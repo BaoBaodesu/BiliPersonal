@@ -1,0 +1,138 @@
+import { useEffect, useRef, useState } from 'react'
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
+import { ArrowLeft, Menu, RefreshCw, Search, X } from 'lucide-react'
+import { useIsMutating, useQueryClient } from '@tanstack/react-query'
+import { useUi } from '../stores/ui'
+import { ModelStatus } from './ModelStatus'
+import { UserAvatar } from './UserAvatar'
+import { Logo } from './Logo'
+
+export const FEED_PATHS: Record<string, 'for_you' | 'hot' | 'explore'> = {
+  '/': 'for_you',
+  '/trending': 'hot',
+  '/explore': 'explore',
+}
+
+export function Header() {
+  const toggleSidebar = useUi((s) => s.toggleSidebar)
+  const setMobileSidebar = useUi((s) => s.setMobileSidebar)
+  const navigate = useNavigate()
+  const location = useLocation()
+  const [params] = useSearchParams()
+  const [q, setQ] = useState(location.pathname === '/search' ? params.get('q') || '' : '')
+  const [mobileSearch, setMobileSearch] = useState(false)
+  const input = useRef<HTMLInputElement>(null)
+  const qc = useQueryClient()
+  const refreshing = useIsMutating({ mutationKey: ['refresh-feed'] }) > 0
+  const onFeed = location.pathname in FEED_PATHS
+
+  useEffect(() => {
+    if (location.pathname === '/search') setQ(params.get('q') || '')
+  }, [location.pathname, params])
+
+  // 键盘操作：/ 聚焦搜索
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement
+      if (e.key === '/' && !['INPUT', 'TEXTAREA'].includes(t.tagName)) {
+        e.preventDefault()
+        input.current?.focus()
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault()
+    const v = q.trim()
+    if (!v) return
+    navigate(`/search?q=${encodeURIComponent(v)}`)
+    input.current?.blur()
+    setMobileSearch(false)
+  }
+
+  const refresh = () => {
+    if (onFeed) {
+      window.dispatchEvent(new CustomEvent('feed:refresh'))
+    } else {
+      qc.invalidateQueries()
+    }
+  }
+
+  const searchForm = (
+    <form onSubmit={submit} role="search" className="flex w-full max-w-[640px] items-center">
+      <div className="flex h-10 flex-1 items-center rounded-l-full border border-line bg-bg pr-2 pl-4 focus-within:border-accent">
+        <input
+          ref={input}
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="搜索"
+          aria-label="搜索"
+          className="h-full w-full bg-transparent text-base text-fg outline-none placeholder:text-subtle"
+        />
+        {q && (
+          <button type="button" aria-label="清除" onClick={() => setQ('')} className="rounded-full p-1 hover:bg-surface-hover">
+            <X size={18} />
+          </button>
+        )}
+      </div>
+      <button
+        type="submit"
+        aria-label="搜索"
+        className="flex h-10 w-16 items-center justify-center rounded-r-full border border-l-0 border-line bg-surface hover:bg-surface-hover"
+      >
+        <Search size={20} />
+      </button>
+    </form>
+  )
+
+  if (mobileSearch) {
+    return (
+      <header className="fixed inset-x-0 top-0 z-40 flex h-14 items-center gap-2 bg-bg px-2">
+        <button aria-label="返回" onClick={() => setMobileSearch(false)} className="rounded-full p-2 hover:bg-surface-hover">
+          <ArrowLeft size={22} />
+        </button>
+        {searchForm}
+      </header>
+    )
+  }
+
+  return (
+    <header className="fixed inset-x-0 top-0 z-40 flex h-14 items-center justify-between gap-4 bg-bg px-4">
+      <div className="flex shrink-0 items-center gap-2">
+        <button
+          aria-label="菜单"
+          onClick={() => (window.innerWidth < 1024 ? setMobileSidebar(true) : toggleSidebar())}
+          className="rounded-full p-2 hover:bg-surface-hover"
+        >
+          <Menu size={22} />
+        </button>
+        <Logo />
+      </div>
+      <div className="hidden flex-1 justify-center sm:flex">{searchForm}</div>
+      <div className="flex shrink-0 items-center gap-1">
+        <button
+          aria-label="搜索"
+          onClick={() => setMobileSearch(true)}
+          className="rounded-full p-2 hover:bg-surface-hover sm:hidden"
+        >
+          <Search size={22} />
+        </button>
+        <ModelStatus />
+        <button
+          onClick={refresh}
+          title={onFeed ? '换一批 (R)' : '刷新'}
+          aria-label="刷新推荐"
+          disabled={refreshing}
+          className="rounded-full p-2 hover:bg-surface-hover disabled:opacity-60"
+        >
+          <RefreshCw size={20} className={refreshing ? 'animate-spin' : ''} />
+        </button>
+        <div className="ml-1">
+          <UserAvatar />
+        </div>
+      </div>
+    </header>
+  )
+}

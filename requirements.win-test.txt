@@ -1,0 +1,54 @@
+# Windows 本机兼容依赖清单（本机部署实测可用）
+#
+# 背景：原始 requirements.txt 在 Windows 上无法用单次 pip 解析安装。
+# 根因：tensorflow_intel==2.18.0 的包元数据声明 `numpy>=1.26.0,<2.1.0`，
+#       与原始 requirements.txt 中的 `numpy==2.2.0` 直接冲突：
+#         × No solution found when resolving dependencies:
+#           Because tensorflow-intel>=2.18.0 depends on numpy>=1.26.0,<2.1.0
+#           and you require numpy==2.2.0 ... your requirements are unsatisfiable.
+# 注意 tensorflow==2.18.0 在 Windows 上只是一个转发包，实际安装的是 tensorflow_intel。
+#
+# 本清单的处理方式：不修改任何核心依赖的大版本，仍严格锁定原版目标版本：
+#   TensorFlow 2.18.x / Keras 3.7.x / NumPy 2.2.x
+# 做法是先让 TensorFlow 在单次解析中满足其自身元数据，再把 numpy 与 keras
+# 覆写回原始锁定值（实测 TensorFlow 2.18.0 在 numpy 2.2.0 下可正常导入与训练）。
+#
+# 安装步骤（三步，缺一不可）：
+#
+#   1) uv venv --python 3.11.16 --seed .venv
+#
+#   2) uv pip install --python .venv/Scripts/python.exe \
+#          tensorflow==2.18.0 tensorflow_intel==2.18.0 Flask==3.1.0 \
+#          matplotlib==3.10.0 Pillow==11.0.0 qrcode==8.0 Requests==2.32.3 \
+#          scikit_learn==1.6.0 urllib3==2.2.3
+#
+#   3) uv pip install --python .venv/Scripts/python.exe --no-deps \
+#          numpy==2.2.0 keras==3.7.0
+#
+# 本机实测最终版本（已通过 import 与 30 epoch 训练验证）：
+#   tensorflow            2.18.0
+#   tensorflow-intel      2.18.0
+#   keras                 3.7.0
+#   numpy                 2.2.0
+#   flask                 3.1.0
+#   matplotlib            3.10.0
+#   scikit-learn          1.6.0
+#   Pillow                11.0.0
+#   qrcode                8.0
+#   requests              2.32.3
+#   urllib3               2.2.3
+#
+# 其余传递依赖（absl-py / protobuf / h5py / ml-dtypes / scipy 等）由 TensorFlow 自动解析，
+# 不额外锁定，保持与原项目行为一致。
+
+Flask==3.1.0
+keras==3.7.0
+matplotlib==3.10.0
+numpy==2.2.0
+Pillow==11.0.0
+qrcode==8.0
+Requests==2.32.3
+scikit_learn==1.6.0
+tensorflow==2.18.0
+tensorflow_intel==2.18.0
+urllib3==2.2.3
