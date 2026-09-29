@@ -1,0 +1,40 @@
+BiliPersonal
+Copyright (c) 2024 tLLWtG
+Copyright (c) 2026 BaoBaodesu
+
+本项目的部分代码来自 bilibili-Recommender（https://github.com/tLLWtG/bilibili-Recommender），
+该上游项目以 MIT License 发布，原始版权归 tLLWtG 及下列贡献者所有：
+
+  tLLWtG          编写后端框架、设计前端页面
+  wegret          构建推荐模型、部分后端代码
+  corgiInequation 对接 bilibili 网站的相关 API、部分后端代码
+
+本仓库的 MIT License 完整保留于 LICENSE 文件，未作任何修改。
+
+--------------------------------------------------------------------------------
+
+BiliPersonal 在 bilibili-Recommender 基础上进行的修改：
+
+v0.2
+  - 前后端重构为 React SPA + Flask /api/v1 JSON API
+  - 新增 Feed 生命周期：候选池、served 去重、分页缓存（stream_id + page）
+  - 新增反馈基础设施与本地 SQLite 存储
+  - 原 Flask + Jinja2 实现完整保留至 legacy/ 目录
+
+v0.2.1
+  - 新增 filter_rules 统一过滤规则层（标题关键词 / UP 主名称关键词 / 精确屏蔽 UP）
+  - 迁移并导入旧屏蔽数据，提供三 Tab 规则管理界面
+  - 新增规则命中统计与 filters:version 缓存即时失效机制
+
+推荐模型结构（Wide & Deep + Attention）、评分公式与训练超参在上述版本中均未改动，
+与上游保持一致。
+
+--------------------------------------------------------------------------------
+
+第三方组件
+
+  TagCanvas       legacy/app/static/js/tagcanvas.min.js  (MIT, Graham Breach)
+  React / Vite / Tailwind CSS / TanStack Query 等前端依赖
+  以各自许可证发布，详见 frontend/package.json 与其对应仓库。
+
+本项目为非官方第三方项目，与哔哩哔哩（Bilibili）官方无任何关联。

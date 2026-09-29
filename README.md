@@ -276,4 +276,10 @@ BiliPersonal 的 v0.2 / v0.2.1 改造由 [BaoBaodesu](https://github.com/BaoBaod
 
 ## License
 
-本项目采用 MIT License。项目使用的第三方依赖遵循各自的许可证，详见 [LICENSE](LICENSE)。
+本项目采用 **MIT License**，派生自 [tLLWtG/bilibili-Recommender](https://github.com/tLLWtG/bilibili-Recommender)（MIT）。
+
+上游的版权声明与许可证全文**原样保留**在 [LICENSE](LICENSE)（`Copyright (c) 2024 tLLWtG`），未作任何修改：
+
+> The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+本项目对上游的修改说明、各版本变更范围与第三方组件清单见 [NOTICE](NOTICE)。项目使用的第三方依赖遵循各自的许可证。
