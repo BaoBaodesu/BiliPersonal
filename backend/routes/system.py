@@ -23,6 +23,7 @@ def status():
         "progress": s["progress"],
         "error": s["error"],
         "model_version": s["model_version"],
+        "v03": s["v03"],
         "trained_at": s["trained_at"],
         "history_samples": s["history_samples"],
         "history_updated_at": s["history_updated_at"],

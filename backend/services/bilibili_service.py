@@ -393,7 +393,7 @@ class BilibiliService:
                 "author": r.get("author_name", ""),
                 "mid": r.get("author_mid"),
                 "duration": r.get("duration", 0),
-                "progress": r.get("progress", 0),
+                "progress": r.get("progress"),
                 "view_at": r.get("view_at", 0),
                 "tname": zone_of(None, r.get("tag_name", "")),
                 "source": "history",
@@ -425,6 +425,7 @@ class BilibiliService:
                 "view": m.get("cnt_info", {}).get("play", 0),
                 "duration": m.get("duration", 0),
                 "pubdate": m.get("pubtime", 0),
+                "fav_time": m.get("fav_time"),
                 "source": "favorite",
             })
         return {"items": items, "has_more": bool(data.get("has_more"))}
@@ -434,7 +435,7 @@ class BilibiliService:
     def collect_training_history(self, history_len, fav_max):
         """
         与原版 getHistoryData.get_history_data 保持相同的取数方式与字段语义：
-        收藏（最多 fav_max 条，progress 取 duration/2，isfaved=1，isliked=0，coin 取收藏数）
+        收藏（最多 fav_max 条，progress 留空，isfaved=1，公开 coin 仅为视频特征）
         + 观看历史（history_len 条，progress=-1 视为看完，isliked 来自 has/like）。
         额外字段 mid/tname/source 仅用于展示与兴趣画像，不进入模型。
         """
@@ -482,10 +483,11 @@ class BilibiliService:
                         "view": media["cnt_info"]["play"],
                         "like": d["like"],
                         "favorite": d["favorite"],
-                        "coin": media["cnt_info"]["collect"],
+                        "coin": d["coin"],
                         "share": d["share"],
                         "duration": d["duration"],
-                        "progress": d["duration"] / 2,
+                        "progress": None,
+                        "fav_time": media.get("fav_time"),
                         "tag": d["tag"],
                         "isfaved": 1,
                         "isliked": 0,

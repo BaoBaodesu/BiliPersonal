@@ -1,38 +1,35 @@
 import { useQuery } from '@tanstack/react-query'
 import { X } from 'lucide-react'
-import { useEffect } from 'react'
+import { useRef, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { api } from '../api/client'
 import type { Video } from '../types'
 import { videoUrl } from '../hooks/format'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 
 const SOURCE_LABEL: Record<string, string> = { hot: '热门列表', rcmd: 'B 站推荐流', search: '搜索' }
 
 // “为什么推荐给我”：基于标签交集与相同 UP 的简单解释
-export function ExplainDialog({ video, onClose }: { video: Video; onClose: () => void }) {
+export function ExplainDialog({ video, onClose, returnFocus }: { video: Video; onClose: () => void; returnFocus?: RefObject<HTMLElement | null> }) {
+  const dialog = useRef<HTMLDivElement>(null)
+  useDialogFocus(dialog, true, onClose, returnFocus)
   const { data, isLoading, isError } = useQuery({
     queryKey: ['explain', video.bvid],
     queryFn: () => api.feed.explain(video.bvid),
   })
-
-  useEffect(() => {
-    const esc = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
-    document.addEventListener('keydown', esc)
-    return () => document.removeEventListener('keydown', esc)
-  }, [onClose])
 
   return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div role="dialog" aria-modal="true" className="fade-in w-full max-w-md rounded-2xl bg-elevated p-6 shadow-pop">
+      <div ref={dialog} role="dialog" aria-modal="true" aria-labelledby="explain-title" tabIndex={-1} className="fade-in max-h-[calc(100dvh-32px)] w-full max-w-md overflow-y-auto rounded-2xl bg-elevated p-6 shadow-pop">
         <div className="mb-4 flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-lg font-medium">为什么推荐给我</h2>
+            <h2 id="explain-title" className="text-lg font-medium">为什么推荐给我</h2>
             <p className="mt-1 line-clamp-2 text-sm text-muted">{video.title}</p>
           </div>
-          <button onClick={onClose} aria-label="关闭" className="rounded-full p-2 hover:bg-surface-hover">
+          <button onClick={onClose} aria-label="关闭" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full hover:bg-surface-hover">
             <X size={20} />
           </button>
         </div>

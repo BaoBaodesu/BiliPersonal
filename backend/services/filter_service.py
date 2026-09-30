@@ -65,9 +65,9 @@ def get_filter_version():
 
 
 def _bump_filter_version(conn):
-    """规则集发生变化：版本 +1，并让已生成的 Feed 缓存失效。
+    """规则集发生变化：版本 +1，读取旧 stream 时重新应用当前过滤。
 
-    只清 feed_cache（可再生的分页缓存），不动 candidates / served_videos /
+    保留 feed_cache 的不可变模型归属，不动 candidates / served_videos /
     recommendation_history / feedback / blocked_ups。
     """
     row = conn.execute("SELECT value FROM app_state WHERE key = ?", (VERSION_KEY,)).fetchone()
@@ -77,7 +77,7 @@ def _bump_filter_version(conn):
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
         (VERSION_KEY, json.dumps(version), time.time()),
     )
-    conn.execute("DELETE FROM feed_cache")
+    # 保留已有 stream 的模型归属；每次读取缓存页仍应用最新硬过滤。
     return version
 
 
@@ -136,7 +136,7 @@ class FilterService:
                 "title": title_rules,
                 "uploader": uploader_rules,
                 "blocked_mids": {u["mid"] for u in ups if u["mid"] is not None},
-                "blocked_names": {u["name"] for u in ups if u["name"]},
+                "blocked_names": {u["name"] for u in ups if u["name"] and u["mid"] is None},
             }
             self._cache_version = version
             return self._cache
@@ -505,7 +505,7 @@ class FilterService:
             raise FilterError("invalid up")
         conn = _connect()
         try:
-            exists = conn.execute("SELECT * FROM blocked_ups WHERE name = ?", (name,)).fetchone()
+            exists = conn.execute("SELECT * FROM blocked_ups WHERE mid=? OR (mid IS NULL AND name=? AND ? IS NULL)", (mid,name,mid)).fetchone()
             if exists:
                 return dict(exists)
             conn.execute("BEGIN")
@@ -513,8 +513,8 @@ class FilterService:
                 "INSERT INTO blocked_ups(mid, name, created_at) VALUES(?, ?, ?)", (mid, name, now())
             )
             conn.execute(
-                "INSERT INTO feedback(bvid, action, video, created_at) VALUES(?, ?, ?, ?)",
-                ("", "block_up", json.dumps({"author": name, "mid": mid}, ensure_ascii=False), now()),
+                "INSERT INTO feedback(bvid, action, video, created_at,blocked_up_id) VALUES(?, ?, ?, ?,?)",
+                ("", "block_up", json.dumps({"author": name, "mid": mid}, ensure_ascii=False), now(),cur.lastrowid),
             )
             _bump_filter_version(conn)
             row = conn.execute("SELECT * FROM blocked_ups WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -531,9 +531,14 @@ class FilterService:
         conn = _connect()
         try:
             conn.execute("BEGIN")
+            row = conn.execute("SELECT mid,name FROM blocked_ups WHERE id=?", (up_id,)).fetchone()
             cur = conn.execute("DELETE FROM blocked_ups WHERE id = ?", (up_id,))
             deleted = bool(cur.rowcount)
             if deleted:
+                for event in conn.execute("SELECT id,video,blocked_up_id FROM feedback WHERE action='block_up' AND revoked_at IS NULL").fetchall():
+                    video = json.loads(event["video"] or "{}")
+                    if event["blocked_up_id"] == up_id or (event["blocked_up_id"] is None and ((row["mid"] is not None and video.get("mid") == row["mid"]) or (row["mid"] is None and video.get("author") == row["name"]))):
+                        conn.execute("UPDATE feedback SET revoked_at=? WHERE id=?", (now(),event["id"]))
                 _bump_filter_version(conn)
             conn.commit()
         except Exception:

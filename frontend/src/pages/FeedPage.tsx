@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
 import { keys, useAutoUpgradeFeed, useFeed, useRefreshFeed } from '../hooks/queries'
@@ -17,16 +17,17 @@ const DEFAULT_CATEGORIES: Category[] = [{ id: 'all', name: '全部' }]
 
 export function FeedPage({ type }: { type: FeedType }) {
   const [category, setCategory] = useState('all')
+  const viewId = useMemo(() => crypto.randomUUID(), [type, category])
   const { data: cats } = useQuery({ queryKey: keys.categories, queryFn: api.feed.categories, staleTime: 10 * 60_000 })
-  const feed = useFeed(type, category)
-  const refresh = useRefreshFeed(type, category)
+  const feed = useFeed(type, category, viewId)
+  const refresh = useRefreshFeed(type, category, viewId)
   const first = feed.data?.pages[0]
   const items = feed.data?.pages.flatMap((p) => p.items) ?? []
 
-  useAutoUpgradeFeed(type, category, first ? first.ranked || first.items.length === 0 : undefined)
+  useAutoUpgradeFeed(type, category, first ? first.ranked || first.items.length === 0 : undefined, viewId)
 
   useEffect(() => {
-    document.title = `${TITLES[type]} - BiliFeed`
+    document.title = `${TITLES[type]} - BiliPersonal`
   }, [type])
 
   // Header 刷新按钮 / 键盘 R：换一批
@@ -34,7 +35,7 @@ export function FeedPage({ type }: { type: FeedType }) {
     const doRefresh = () => !refresh.isPending && refresh.mutate()
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement
-      if (e.key.toLowerCase() === 'r' && !e.ctrlKey && !e.metaKey && !['INPUT', 'TEXTAREA'].includes(t.tagName)) {
+      if (e.key.toLowerCase() === 'r' && !e.defaultPrevented && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !t.isContentEditable && !t.closest('[role="dialog"], [role="menu"]') && !['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName)) {
         doRefresh()
       }
     }
@@ -77,19 +78,26 @@ export function FeedPage({ type }: { type: FeedType }) {
     body = (
       <div className={refresh.isPending ? 'pointer-events-none opacity-50 transition-opacity' : 'transition-opacity'}>
         <VideoGrid videos={items}>{feed.isFetchingNextPage && <SkeletonCards count={4} />}</VideoGrid>
-        <LoadMoreTrigger onLoad={() => feed.hasNextPage && !feed.isFetchingNextPage && feed.fetchNextPage()} disabled={!feed.hasNextPage} />
+        <LoadMoreTrigger onLoad={() => feed.fetchNextPage()} disabled={!feed.hasNextPage || feed.isFetchingNextPage || feed.isFetchNextPageError || refresh.isPending} />
+        {feed.hasNextPage && !feed.isFetchNextPageError && (
+          <div className="py-6 text-center">
+            <button disabled={feed.isFetchingNextPage || refresh.isPending} onClick={() => feed.fetchNextPage()} className="h-11 rounded-full bg-surface px-5 text-sm hover:bg-surface-hover disabled:opacity-60">
+              {feed.isFetchingNextPage ? '加载中…' : '加载更多'}
+            </button>
+          </div>
+        )}
         {feed.isFetchNextPageError && (
           <div className="py-8 text-center text-sm text-muted">
             加载失败{' '}
-            <button className="text-accent" onClick={() => feed.fetchNextPage()}>
-              重试
+            <button disabled={feed.isFetchingNextPage} className="min-h-11 px-3 text-accent disabled:opacity-60" onClick={() => feed.fetchNextPage()}>
+              {feed.isFetchingNextPage ? '重试中…' : '重试'}
             </button>
           </div>
         )}
         {!feed.hasNextPage && (
           <div className="py-10 text-center text-sm text-muted">
             已经到底了 ·{' '}
-            <button className="text-accent" onClick={() => refresh.mutate()}>
+            <button disabled={refresh.isPending} className="min-h-11 px-3 text-accent disabled:opacity-60" onClick={() => refresh.mutate()}>
               换一批
             </button>
           </div>
@@ -100,15 +108,15 @@ export function FeedPage({ type }: { type: FeedType }) {
 
   return (
     <div>
-      <div className="sticky top-14 z-20 -mx-4 bg-bg px-4 pt-2 pb-3 sm:-mx-6 sm:px-6">
-        <CategoryChips categories={cats?.items ?? DEFAULT_CATEGORIES} value={category} onChange={setCategory} />
+      <h1 className="sr-only">{TITLES[type]}</h1>
+      <div className="sticky top-14 z-20 -mx-4 mb-4 bg-bg px-4 py-1.5 sm:-mx-6 sm:px-6">
+        <FeedToolbar first={first} onRefresh={() => refresh.mutate()} refreshing={refresh.isPending}>
+          <CategoryChips categories={cats?.items ?? DEFAULT_CATEGORIES} value={category} onChange={setCategory} />
+        </FeedToolbar>
       </div>
       {refresh.isPending && (
         <div className="progress-bar fixed top-14 right-0 left-0 z-30 h-0.5 overflow-hidden" aria-hidden />
       )}
-      <div className="mb-4">
-        <FeedToolbar first={first} onRefresh={() => refresh.mutate()} refreshing={refresh.isPending} />
-      </div>
       {body}
     </div>
   )

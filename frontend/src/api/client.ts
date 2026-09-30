@@ -66,13 +66,14 @@ export const api = {
     logout: () => post<{ success: boolean }>('/auth/logout'),
   },
   feed: {
-    get: (type: FeedType, category: string, cursor?: string | null, limit = 12) => {
+    get: (type: FeedType, category: string, cursor?: string | null, limit = 12, view_id?: string) => {
       const q = new URLSearchParams({ type, category, limit: String(limit) })
       if (cursor) q.set('cursor', cursor)
+      if (view_id && !cursor) q.set('view_id', view_id)
       return request<FeedPage>(`/feed?${q}`)
     },
-    refresh: (type: FeedType, category: string, limit = 12) =>
-      post<FeedPage>('/feed/refresh', { type, category, limit }),
+    refresh: (type: FeedType, category: string, limit = 12, view_id = crypto.randomUUID()) =>
+      post<FeedPage>('/feed/refresh', { type, category, limit, view_id }),
     categories: () => request<{ items: Category[] }>('/feed/categories'),
     explain: (bvid: string) => request<Explain>(`/feed/explain/${bvid}`),
     history: (offset = 0, type?: string) =>
@@ -85,8 +86,10 @@ export const api = {
       `/search?q=${encodeURIComponent(q)}&page=${page}`,
     ),
   feedback: {
-    send: (bvid: string, action: FeedbackAction, video?: Partial<Video>) =>
-      post<{ ok?: boolean; undone?: boolean }>('/feedback', { bvid, action, video }),
+    send: (bvid: string, action: FeedbackAction, video?: Partial<Video>, event_id = crypto.randomUUID()) =>
+      post<{ ok?: boolean; undone?: boolean }>('/feedback', { bvid, action, video, event_id,
+        recommendation_id: video?.recommendation_id, view_id: video?.view_id,
+        exposure_id: video?.recommendation_id && video.view_id ? `${video.view_id}:${video.recommendation_id}` : undefined }),
     history: (action?: string) =>
       request<{ items: FeedbackRecord[] }>(`/feedback/history${action ? `?action=${action}` : ''}`),
     remove: (id: number) => del<{ success: boolean }>(`/feedback/${id}`),

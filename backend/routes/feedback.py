@@ -15,7 +15,7 @@ def post_feedback():
     if not body.get("bvid"):
         return error("bad_request", "Missing bvid", 400)
     try:
-        return jsonify(feedback.record(body["bvid"], body.get("action"), body.get("video")))
+        return jsonify(feedback.record(body["bvid"], body.get("action"), body.get("video"), body))
     except FeedbackError as e:
         return error("bad_request", str(e), 400)
 

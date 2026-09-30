@@ -22,7 +22,7 @@ export function SearchPage() {
   const items = query.data?.pages.flatMap((p) => p.items) ?? []
 
   useEffect(() => {
-    document.title = `${q} - 搜索 - BiliFeed`
+    document.title = `${q} - 搜索 - BiliPersonal`
   }, [q])
 
   if (!q) return <EmptyState title="输入关键词开始搜索" description="按 / 键可以快速聚焦搜索框。" />

@@ -43,36 +43,32 @@ class RecommendationService:
 
     # ---------------- 对外接口 ----------------
 
-    def get_feed(self, feed_type, category="all", cursor=None, limit=DEFAULT_LIMIT):
+    def get_feed(self, feed_type, category="all", cursor=None, limit=DEFAULT_LIMIT, view_id=None):
         self._check_type(feed_type)
-        limit = max(4, min(int(limit or DEFAULT_LIMIT), MAX_LIMIT))
         if cursor:
             stream_id, page = self._parse_cursor(cursor)
-            return self._page(stream_id, feed_type, category, page, limit)
+            return self._page(stream_id, feed_type, category, page, limit, view_id)
+        return self.refresh(feed_type, category, limit, view_id)
 
-        # 首次打开：优先返回最近的缓存 stream 第一页
-        with connect() as conn:
-            row = conn.execute(
-                "SELECT stream_id FROM feed_cache WHERE feed_type = ? AND category = ? AND page = 0 "
-                "AND items != '[]' AND created_at > ? ORDER BY created_at DESC LIMIT 1",
-                (feed_type, category, time.time() - CACHE_REUSE_SECONDS),
-            ).fetchone()
-        if row:
-            result = self._page(row["stream_id"], feed_type, category, 0, limit)
-            result["from_cache"] = True
-            self.prefetch(feed_type)
-            return result
-        return self.refresh(feed_type, category, limit)
-
-    def refresh(self, feed_type, category="all", limit=DEFAULT_LIMIT):
-        """换一批：新建 stream"""
+    def refresh(self, feed_type, category="all", limit=DEFAULT_LIMIT, view_id=None):
         self._check_type(feed_type)
         limit = max(4, min(int(limit or DEFAULT_LIMIT), MAX_LIMIT))
-        for source in FEED_SOURCES[feed_type]:
-            if pool.is_stale(source):
-                self._background(lambda s=source: pool.expand(s, restart=True, manual=True), f"stale:{source}")
-        stream_id = uuid.uuid4().hex[:12]
-        return self._page(stream_id, feed_type, category, 0, limit)
+        view_id = view_id or uuid.uuid4().hex
+        if not isinstance(view_id, str) or not 1 <= len(view_id) <= 128:
+            raise FeedError("invalid view id")
+        from backend.services.experiment_service import experiments
+        # 先持久化批次，网络失败重试也沿用分组和模型。
+        with self._gen_lock:
+            with connect() as conn:
+                existing = conn.execute("SELECT stream_id FROM feed_streams WHERE view_id=? AND feed_type=? AND category=?", (view_id,feed_type,category)).fetchone()
+                if existing:
+                    stream_id = existing[0]
+                else:
+                    stream_id = uuid.uuid4().hex[:12]
+                    context = experiments.context(feed_type, category, view_id)
+                    conn.execute("INSERT INTO feed_streams(stream_id,view_id,feed_type,category,page_limit,model_version,experiment_id,arm,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                                 (stream_id,view_id,feed_type,category,limit,context["model_version"],context["experiment_id"],context["arm"],now()))
+        return self._page(stream_id, feed_type, category, 0, limit, view_id)
 
     def explain(self, bvid):
         from backend.recommender.recommender import read_history
@@ -143,7 +139,9 @@ class RecommendationService:
             ).fetchall()
         valid = 0
         if training.recommender:
-            valid = sum(1 for v in pool.all(("hot", "rcmd")) if training.recommender.known_tags(v.get("tag") or []))
+            valid = sum(1 for v in pool.all(("hot", "rcmd")) if
+                        (all(v.get(k) is not None for k in ("view","like","favorite")) if str(training.model_version).startswith("ranker-v03-")
+                         else training.recommender.known_tags(v.get("tag") or [])))
         return {
             "pool": {"hot": pool.count("hot"), "rcmd": pool.count("rcmd"), "total": pool.count()},
             "pool_state": {s: pool.state(s) for s in ("hot", "rcmd")},
@@ -168,8 +166,6 @@ class RecommendationService:
                 for source in ("hot", "rcmd"):
                     if pool.count(source) < 24 or pool.is_stale(source):
                         pool.expand(source, restart=pool.is_stale(source))
-                if training.recommender and not self._has_cached_first_page("for_you"):
-                    self.refresh("for_you")
             except LoginExpired:
                 pass
             except Exception:
@@ -194,11 +190,25 @@ class RecommendationService:
 
     # ---------------- 分页生成 ----------------
 
-    def _page(self, stream_id, feed_type, category, page, limit):
+    def _page(self, stream_id, feed_type, category, page, limit, view_id=None):
         with self._gen_lock:
+            with connect() as conn:
+                row = conn.execute("SELECT * FROM feed_streams WHERE stream_id=?", (stream_id,)).fetchone()
+            if not row or row["feed_type"] != feed_type or row["category"] != category or page < 0 or (view_id and row["view_id"] != view_id):
+                raise FeedError("invalid or expired stream")
+            context = dict(row)
+            from backend.services.model_registry import registry
+            ended = registry.state().get("last_trial")
+            if context["experiment_id"] and (not ended or ended["id"] != context["experiment_id"]):
+                path = registry.root / "experiments" / context["experiment_id"] / "trial.json"
+                if path.exists():
+                    ended = json.loads(path.read_text(encoding="utf-8"))
+            if context["experiment_id"] and context["arm"] == "candidate" and ended and ended["id"] == context["experiment_id"] and ended["status"] in ("stopped","rejected"):
+                raise FeedError("在线试用已停止，请换一批继续使用当前模型")
+            limit = row["page_limit"]
             cached = self._cached_page(stream_id, page)
             if cached is None:
-                cached = self._generate(stream_id, feed_type, category, page, limit)
+                cached = self._generate(stream_id, feed_type, category, page, limit, context)
         items, has_more, created_at = cached
         ranked = bool(items) and items[0].get("rating") is not None
         # 缓存页生成后用户可能又屏蔽了 UP / 关键词，返回前重新过滤
@@ -211,7 +221,9 @@ class RecommendationService:
             "generated_at": created_at,
             "from_cache": False,
             "ranked": ranked,
-            "model": training.status()["model"],
+            "model": "ready" if context["model_version"] != "fallback-v03" else "none",
+            "model_version": context["model_version"],
+            "view_id": context["view_id"],
             "notice": "rate_limited" if bili.rate_limited else None,
         }
 
@@ -225,11 +237,13 @@ class RecommendationService:
             return None
         return json.loads(row["items"]), bool(row["has_more"]), row["created_at"]
 
-    def _generate(self, stream_id, feed_type, category, page, limit):
+    def _generate(self, stream_id, feed_type, category, page, limit, context):
+        from backend.services.model_registry import registry
+        bundle = registry.load(context["model_version"])
         sources = FEED_SOURCES[feed_type]
         stream_bvids = self._stream_bvids(stream_id)
 
-        ranked = self._rank(feed_type, category, sources, exclude=stream_bvids, exclude_served=True)
+        ranked = self._rank(feed_type, category, sources, exclude=stream_bvids, exclude_served=True, bundle=bundle)
         # 候选不足：同步抓取新候选（每个来源最多一页）
         if len(ranked) < limit:
             for source in sources:
@@ -237,37 +251,40 @@ class RecommendationService:
                     pool.expand(source)
                 except LoginExpired:
                     raise
-            ranked = self._rank(feed_type, category, sources, exclude=stream_bvids, exclude_served=True)
+            ranked = self._rank(feed_type, category, sources, exclude=stream_bvids, exclude_served=True, bundle=bundle)
         # 候选真正耗尽：回退使用较早展示过的视频（最久未展示的优先）
         if len(ranked) < limit:
             already = {v["bvid"] for v in ranked}
             fallback = [
-                v for v in self._rank(feed_type, category, sources, exclude=stream_bvids | already, exclude_served=False)
+                v for v in self._rank(feed_type, category, sources, exclude=stream_bvids | already, exclude_served=False, bundle=bundle)
             ]
             last_served = self._last_served(feed_type)
             fallback.sort(key=lambda v: last_served.get(v["bvid"], 0))
             ranked += fallback
 
         items = ranked[:limit]
+        if bundle and getattr(bundle, "policy", "base") == "diversity" and feed_type == "for_you" and category == "all":
+            from backend.services.ranking_policy import diversify
+            items = diversify(ranked, limit, self._stream_authors(stream_id))
         has_more = len(ranked) > limit or not bili.rate_limited
         if not items:
             has_more = False
         for i, item in enumerate(items):
             item["rank"] = page * limit + i + 1
         created_at = now()
-        self._record(stream_id, feed_type, category, page, items, has_more, created_at)
+        self._record(stream_id, feed_type, category, page, items, has_more, created_at, context)
         self.prefetch(feed_type)
         return items, has_more, created_at
 
-    def _rank(self, feed_type, category, sources, exclude, exclude_served):
+    def _rank(self, feed_type, category, sources, exclude, exclude_served, bundle=None):
         candidates = pool.all(sources)
         # 候选真正参与 Feed 生成时才记命中，避免预取预判污染计数
         candidates = self._apply_filters(
             candidates, feed_type, exclude, exclude_served, record_hits=True
         )
-        candidates = self._apply_category(candidates, category)
+        candidates = self._apply_category(candidates, category, bundle)
 
-        recommender = training.recommender
+        recommender = bundle
         if recommender is None:
             # 模型未就绪：按候选池原始顺序（热门排名 / B 站推荐顺序）返回，rating 为空
             return [self._item(v, None, []) for v in candidates]
@@ -276,10 +293,11 @@ class RecommendationService:
         scored.sort(key=lambda x: x[1], reverse=True)
         ranked = [self._item(v, rating, tags) for v, rating, tags in scored]
         scored_bvids = {v["bvid"] for v, _, _ in scored}
-        # 与训练集没有标签交集的候选：原版直接丢弃。
-        # v0.2 不改模型，只在产品层保留：探索 Feed 每 3 条插入 1 条；其他 Feed 放在有评分内容之后
+        # 未评分内容保留；探索流每三条放一条未知标签内容，v0.3 的未知内容仍保留评分。
         unknown = [self._item(v, None, []) for v in candidates if v["bvid"] not in scored_bvids]
         if feed_type == "explore":
+            unknown = [v for v in ranked if not v["matched_tags"]] + unknown
+            ranked = [v for v in ranked if v["matched_tags"]]
             mixed = []
             while ranked or unknown:
                 mixed += ranked[:2]
@@ -309,7 +327,7 @@ class RecommendationService:
         kept, _stats = filters.filter_candidates(stage, record=record_hits)
         return kept
 
-    def _apply_category(self, candidates, category):
+    def _apply_category(self, candidates, category, bundle=None):
         if not category or category == "all":
             return candidates
         if category == "recent":
@@ -320,7 +338,7 @@ class RecommendationService:
             recent_authors = {h.get("author") for h in history}
             return [v for v in candidates if recent_tags & set(v.get("tag") or []) or v.get("author") in recent_authors]
         if category == "discover":
-            recommender = training.recommender
+            recommender = bundle
             if recommender is None:
                 return candidates
             return [v for v in candidates if not recommender.known_tags(v.get("tag") or [])]
@@ -329,6 +347,7 @@ class RecommendationService:
     @staticmethod
     def _item(video, rating, matched_tags):
         return {
+            "_snapshot": dict(video),
             "bvid": video["bvid"],
             "title": video.get("title", ""),
             "pic": video.get("pic", ""),
@@ -349,37 +368,29 @@ class RecommendationService:
 
     # ---------------- 记录 ----------------
 
-    def _record(self, stream_id, feed_type, category, page, items, has_more, created_at):
-        ranked = bool(items) and items[0].get("rating") is not None
+    def _record(self, stream_id, feed_type, category, page, items, has_more, created_at, context):
+        from backend.services.evaluation_service import evaluation
+        predictions = evaluation.predict([v["_snapshot"] for v in items])
         with connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO feed_cache(stream_id, feed_type, category, page, items, has_more, created_at) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?)",
-                (stream_id, feed_type, category, page, json.dumps(items, ensure_ascii=False), int(has_more), created_at),
-            )
-            # 旧 stream 只保留最近 3 天
-            conn.execute("DELETE FROM feed_cache WHERE created_at < ?", (created_at - 3 * 86400,))
-            # 模型未就绪时的临时结果不计入 served，模型就绪后可以重新参与排序
-            if not ranked:
-                return
             for item in items:
-                conn.execute(
-                    "INSERT INTO served_videos(bvid, feed_type, first_served_at, last_served_at, times) "
-                    "VALUES(?, ?, ?, ?, 1) ON CONFLICT(bvid, feed_type) DO UPDATE SET "
-                    "last_served_at = excluded.last_served_at, times = times + 1",
-                    (item["bvid"], feed_type, created_at, created_at),
-                )
-                conn.execute(
-                    "INSERT INTO recommendation_history(bvid, feed_type, title, author, pic, rating, rank, "
-                    "model_version, served_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (item["bvid"], feed_type, item["title"], item["author"], item["pic"], item["rating"],
-                     item["rank"], training.model_version, created_at),
-                )
+                snapshot = item.pop("_snapshot")
+                conn.execute("INSERT INTO served_videos(bvid,feed_type,first_served_at,last_served_at,times) VALUES(?,?,?,?,1) ON CONFLICT(bvid,feed_type) DO UPDATE SET last_served_at=excluded.last_served_at,times=times+1", (item["bvid"],feed_type,created_at,created_at))
+                result = conn.execute("INSERT INTO recommendation_history(bvid,feed_type,title,author,pic,rating,rank,model_version,served_at,stream_id,page,view_id,experiment_id,arm,video_snapshot,predictions) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                     (item["bvid"],feed_type,item["title"],item["author"],item["pic"],item["rating"],item["rank"],context["model_version"],created_at,stream_id,page,context["view_id"],context["experiment_id"],context["arm"],json.dumps(snapshot,ensure_ascii=False),json.dumps(predictions.get(item["bvid"],{}))))
+                item.update(recommendation_id=result.lastrowid, view_id=context["view_id"], model_version=context["model_version"])
+            conn.execute("INSERT INTO feed_cache(stream_id,feed_type,category,page,items,has_more,created_at,model_version,page_limit,view_id,experiment_id,arm) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (stream_id,feed_type,category,page,json.dumps(items,ensure_ascii=False),int(has_more),created_at,context["model_version"],context["page_limit"],context["view_id"],context["experiment_id"],context["arm"]))
+            conn.execute("DELETE FROM feed_cache WHERE created_at<?", (created_at-3*86400,))
 
     def _stream_bvids(self, stream_id):
         with connect() as conn:
             rows = conn.execute("SELECT items FROM feed_cache WHERE stream_id = ?", (stream_id,)).fetchall()
         return {item["bvid"] for row in rows for item in json.loads(row["items"])}
+
+    def _stream_authors(self, stream_id):
+        with connect() as conn:
+            rows = conn.execute("SELECT items FROM feed_cache WHERE stream_id=? ORDER BY page", (stream_id,)).fetchall()
+        return [str(v.get("mid") or v.get("author")) for r in rows for v in json.loads(r[0])]
 
     def _hidden_bvids(self):
         """被用户标记为不感兴趣 / 屏蔽 / 已看的视频，不再进入 Feed。"""
@@ -387,7 +398,7 @@ class RecommendationService:
 
         with connect() as conn:
             rows = conn.execute(
-                f"SELECT DISTINCT bvid FROM feedback WHERE action IN ({','.join('?' * len(HIDING_ACTIONS))})",
+                f"SELECT DISTINCT bvid FROM feedback WHERE revoked_at IS NULL AND action IN ({','.join('?' * len(HIDING_ACTIONS))})",
                 HIDING_ACTIONS,
             ).fetchall()
         return {r["bvid"] for r in rows}
@@ -412,6 +423,8 @@ class RecommendationService:
         recommender = training.recommender
         # 模型就绪时只统计能被模型评分的候选，避免有效候选耗尽后才补充
         if recommender:
+            if str(training.model_version).startswith("ranker-v03-"):
+                return sum(all(v.get(k) is not None for k in ("view","like","favorite")) for v in candidates)
             return sum(1 for v in candidates if recommender.known_tags(v.get("tag") or []))
         return len(candidates)
 
@@ -426,13 +439,7 @@ class RecommendationService:
     # ---------------- 工具 ----------------
 
     def _on_model_changed(self):
-        # 新模型就绪：删除未排序的临时首页缓存，让下次打开时使用模型排序结果
-        with connect() as conn:
-            rows = conn.execute("SELECT stream_id, items FROM feed_cache WHERE page = 0").fetchall()
-            for row in rows:
-                items = json.loads(row["items"])
-                if items and items[0].get("rating") is None:
-                    conn.execute("DELETE FROM feed_cache WHERE stream_id = ?", (row["stream_id"],))
+        # 已发出的 stream 保留版本，只为新浏览准备候选。
         self.warmup()
 
     def _background(self, fn, key):

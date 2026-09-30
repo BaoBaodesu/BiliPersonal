@@ -1,4 +1,6 @@
-import { NavLink } from 'react-router-dom'
+import { useEffect, useRef } from 'react'
+import { NavLink, useLocation, useSearchParams } from 'react-router-dom'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import {
   Ban,
   Clock,
@@ -33,7 +35,7 @@ const SECTIONS = [
   [
     { to: '/feedback/not-interested', label: '不感兴趣', icon: ThumbsDown },
     { to: '/settings/filters?tab=ups', label: '屏蔽的 UP', icon: UserX },
-    { to: '/settings/filters?tab=keywords', label: '屏蔽关键词', icon: Ban },
+    { to: '/settings/filters?tab=title', label: '屏蔽关键词', icon: Ban },
   ],
   [
     { to: '/profile/interests', label: '兴趣画像', icon: ChartColumn },
@@ -51,6 +53,8 @@ const MINI = [
 ]
 
 function FullNav({ onNavigate }: { onNavigate?: () => void }) {
+  const location = useLocation()
+  const [params] = useSearchParams()
   return (
     <nav className="thin-scroll h-full overflow-y-auto px-3 pb-6">
       {SECTIONS.map((section, i) => (
@@ -60,10 +64,11 @@ function FullNav({ onNavigate }: { onNavigate?: () => void }) {
               key={item.to}
               to={item.to}
               end={item.end}
+              aria-current={item.to.includes('?') ? (location.pathname === '/settings/filters' && (item.to.endsWith('ups') ? params.get('tab') === 'ups' : params.get('tab') !== 'ups') ? 'page' : false) : undefined}
               onClick={onNavigate}
               className={({ isActive }) =>
-                `flex h-10 items-center gap-6 rounded-lg px-3 text-sm ${
-                  isActive && !item.to.includes('?') ? 'bg-surface font-medium' : 'hover:bg-surface'
+                `flex h-11 items-center gap-6 rounded-lg px-3 text-sm ${
+                  (item.to.includes('?') ? location.pathname === '/settings/filters' && (item.to.endsWith('ups') ? params.get('tab') === 'ups' : params.get('tab') !== 'ups') : isActive) ? 'bg-surface font-medium' : 'hover:bg-surface'
                 }`
               }
             >
@@ -74,7 +79,7 @@ function FullNav({ onNavigate }: { onNavigate?: () => void }) {
         </div>
       ))}
       <p className="px-3 pt-2 text-xs leading-5 text-subtle">
-        BiliFeed v0.2 · 本地个性化推荐客户端
+        BiliPersonal v0.2 · 本地个性化推荐客户端
         <br />
         仅用于学习与测试
       </p>
@@ -86,6 +91,15 @@ export function Sidebar() {
   const expanded = useUi((s) => s.sidebarExpanded)
   const mobileOpen = useUi((s) => s.mobileSidebar)
   const setMobile = useUi((s) => s.setMobileSidebar)
+  const drawer = useRef<HTMLElement>(null)
+  useDialogFocus(drawer, mobileOpen, () => setMobile(false))
+
+  useEffect(() => {
+    const desktop = window.matchMedia('(min-width: 1024px)')
+    const closeOnBreakpoint = () => setMobile(false)
+    desktop.addEventListener('change', closeOnBreakpoint)
+    return () => desktop.removeEventListener('change', closeOnBreakpoint)
+  }, [setMobile])
 
   return (
     <>
@@ -104,7 +118,7 @@ export function Sidebar() {
                 end={item.end}
                 className={({ isActive }) =>
                   `flex flex-col items-center gap-1.5 rounded-lg py-4 text-[10px] hover:bg-surface ${
-                    isActive ? 'font-medium' : ''
+                    isActive ? 'bg-surface font-medium' : ''
                   }`
                 }
               >
@@ -120,9 +134,9 @@ export function Sidebar() {
       {mobileOpen && (
         <div className="fixed inset-0 z-50 lg:hidden">
           <div className="absolute inset-0 bg-black/50" onClick={() => setMobile(false)} />
-          <aside className="fade-in absolute top-0 bottom-0 left-0 w-60 bg-bg">
+          <aside ref={drawer} role="dialog" aria-modal="true" aria-label="主导航" tabIndex={-1} className="fade-in absolute top-0 bottom-0 left-0 w-60 bg-bg">
             <div className="flex h-14 items-center gap-2 px-4">
-              <button aria-label="关闭菜单" onClick={() => setMobile(false)} className="rounded-full p-2 hover:bg-surface-hover">
+              <button aria-label="关闭菜单" onClick={() => setMobile(false)} className="flex h-11 w-11 items-center justify-center rounded-full hover:bg-surface-hover">
                 <X size={22} />
               </button>
               <Logo />

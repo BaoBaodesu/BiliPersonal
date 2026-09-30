@@ -76,6 +76,20 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* 键盘操作使用一致且清晰的焦点样式。 */
+:where(button, a, input, select, textarea):focus-visible {
+  outline: 2px solid var(--fg);
+  outline-offset: 3px;
+}
+
+button:not(:disabled), a {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
 /* 横向滚动条隐藏（Category Chips） */
 .no-scrollbar {
   scrollbar-width: none;
@@ -144,6 +158,9 @@ body {
   .skeleton,
   .fade-in,
   .progress-bar::after {
+    animation: none;
+  }
+  .animate-spin {
     animation: none;
   }
 }

@@ -8,6 +8,17 @@ from backend.services.recommendation_service import FeedError, recommendation
 bp = Blueprint("feed", __name__, url_prefix="/api/v1")
 
 
+@bp.post("/feed/exposures")
+@api
+@login_required
+def exposures():
+    from backend.services.exposure_service import record_exposures
+    try:
+        return jsonify(record_exposures((request.get_json(silent=True) or {}).get("items")))
+    except ValueError as e:
+        return error("bad_request", str(e), 400)
+
+
 @bp.get("/feed")
 @api
 @login_required
@@ -18,6 +29,7 @@ def get_feed():
             request.args.get("category", "all"),
             request.args.get("cursor"),
             request.args.get("limit", 12),
+            request.args.get("view_id"),
         ))
     except FeedError as e:
         return error("bad_request", str(e), 400)
@@ -30,7 +42,7 @@ def refresh_feed():
     body = request.get_json(silent=True) or {}
     try:
         return jsonify(recommendation.refresh(
-            body.get("type", "for_you"), body.get("category", "all"), body.get("limit", 12)
+            body.get("type", "for_you"), body.get("category", "all"), body.get("limit", 12), body.get("view_id")
         ))
     except FeedError as e:
         return error("bad_request", str(e), 400)

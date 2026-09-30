@@ -1,6 +1,9 @@
 export type FeedType = 'for_you' | 'hot' | 'explore'
 
 export interface Video {
+  recommendation_id?: number
+  view_id?: string
+  model_version?: string
   bvid: string
   title: string
   pic: string
@@ -23,6 +26,8 @@ export interface Video {
 }
 
 export interface FeedPage {
+  view_id?: string
+  model_version?: string
   items: Video[]
   next_cursor: string | null
   has_more: boolean

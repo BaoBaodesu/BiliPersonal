@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Ban,
@@ -11,6 +11,8 @@ import {
   ThumbsUp,
   UserX,
   Tag,
+  ArrowLeft,
+  Loader2,
 } from 'lucide-react'
 import type { Video } from '../types'
 import { useBlockKeyword, useFeedback } from '../hooks/queries'
@@ -39,7 +41,18 @@ export function VideoCardMenu({ video, inFeed = true }: Props) {
     const close = (e: MouseEvent) => {
       if (!menu.current?.contains(e.target as Node) && !btn.current?.contains(e.target as Node)) setOpen(false)
     }
-    const esc = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false)
+    const esc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' || e.key === 'Tab') {
+        if (e.key === 'Escape') e.preventDefault()
+        setOpen(false)
+      } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
+        e.preventDefault()
+        const items = Array.from(menu.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])
+        if (!items.length) return
+        const index = items.indexOf(document.activeElement as HTMLButtonElement)
+        items[e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 : (index + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus()
+      }
+    }
     const scroll = () => setOpen(false)
     document.addEventListener('mousedown', close)
     document.addEventListener('keydown', esc)
@@ -48,8 +61,19 @@ export function VideoCardMenu({ video, inFeed = true }: Props) {
       document.removeEventListener('mousedown', close)
       document.removeEventListener('keydown', esc)
       window.removeEventListener('scroll', scroll)
+      if (menu.current?.contains(document.activeElement) || document.activeElement === document.body) btn.current?.focus({ preventScroll: true })
     }
   }, [open])
+
+  useLayoutEffect(() => {
+    if (!open || !menu.current || !btn.current) return
+    const r = btn.current.getBoundingClientRect()
+    setPos({
+      left: Math.max(8, Math.min(r.right - menu.current.offsetWidth, window.innerWidth - menu.current.offsetWidth - 8)),
+      top: Math.max(8, Math.min(r.bottom + 4 + menu.current.offsetHeight > window.innerHeight - 8 ? r.top - menu.current.offsetHeight - 4 : r.bottom + 4, window.innerHeight - menu.current.offsetHeight - 8)),
+    })
+    menu.current.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true })
+  }, [open, keywordMode])
 
   const toggle = (e: React.MouseEvent) => {
     e.preventDefault()
@@ -57,7 +81,7 @@ export function VideoCardMenu({ video, inFeed = true }: Props) {
     const r = btn.current!.getBoundingClientRect()
     const width = 264
     const left = Math.min(Math.max(8, r.right - width), window.innerWidth - width - 8)
-    const top = r.bottom + 360 > window.innerHeight ? Math.max(8, r.top - 360) : r.bottom + 4
+    const top = r.bottom + 4
     setPos({ top, left })
     setKeywordMode(false)
     setOpen((o) => !o)
@@ -75,7 +99,7 @@ export function VideoCardMenu({ video, inFeed = true }: Props) {
   )
 
   const item =
-    'flex w-full items-center gap-4 px-4 py-2 text-left text-sm text-fg hover:bg-surface-hover focus-visible:bg-surface-hover outline-none'
+    'flex min-h-11 w-full items-center gap-3 px-4 py-2 text-left text-sm text-fg hover:bg-surface-hover focus-visible:bg-surface-hover outline-none disabled:opacity-50'
 
   return (
     <>
@@ -85,19 +109,22 @@ export function VideoCardMenu({ video, inFeed = true }: Props) {
         aria-label="更多操作"
         aria-haspopup="menu"
         aria-expanded={open}
-        className={`-mr-2 flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-fg transition hover:bg-surface-hover focus-visible:opacity-100 ${
+        aria-busy={feedback.isPending || blockKeyword.isPending}
+        disabled={feedback.isPending || blockKeyword.isPending}
+        className={`-mr-2 flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-fg transition hover:bg-surface-hover focus-visible:opacity-100 disabled:opacity-60 ${
           open ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'
         }`}
       >
-        <MoreVertical size={20} />
+        {feedback.isPending || blockKeyword.isPending ? <Loader2 size={20} className="animate-spin" /> : <MoreVertical size={20} />}
       </button>
       {open &&
         createPortal(
           <div
             ref={menu}
             role="menu"
+            aria-label="视频操作"
             style={{ top: pos.top, left: pos.left }}
-            className="fade-in fixed z-50 w-66 overflow-hidden rounded-xl bg-elevated py-2 shadow-pop"
+            className="fade-in fixed z-50 max-h-[calc(100dvh-16px)] w-66 max-w-[calc(100vw-16px)] overflow-y-auto rounded-xl bg-elevated py-2 shadow-pop"
           >
             {!keywordMode ? (
               <>
@@ -128,9 +155,13 @@ export function VideoCardMenu({ video, inFeed = true }: Props) {
                 <button
                   role="menuitem"
                   className={item}
-                  onClick={() => {
-                    navigator.clipboard?.writeText(video.bvid)
-                    toast(`已复制 ${video.bvid}`)
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(video.bvid)
+                      toast(`已复制 ${video.bvid}`)
+                    } catch {
+                      toast('复制失败，请检查剪贴板权限后重试')
+                    }
                     setOpen(false)
                   }}
                 >
@@ -151,16 +182,18 @@ export function VideoCardMenu({ video, inFeed = true }: Props) {
               </>
             ) : (
               <div className="px-2">
+                <button role="menuitem" className={item} onClick={() => setKeywordMode(false)}><ArrowLeft size={20} />返回操作</button>
                 <div className="px-2 pb-2 text-xs text-muted">选择要屏蔽的关键词</div>
                 <div className="flex max-h-72 flex-wrap gap-2 overflow-y-auto px-2 pb-1">
                   {keywordOptions.map((k) => (
                     <button
                       key={k}
+                      role="menuitem"
                       onClick={() => {
                         blockKeyword.mutate(k)
                         setOpen(false)
                       }}
-                      className="flex items-center gap-1 rounded-lg bg-surface px-3 py-1.5 text-sm hover:bg-surface-hover"
+                      className="flex min-h-11 items-center gap-1 rounded-lg bg-surface px-3 py-1.5 text-sm hover:bg-surface-hover"
                     >
                       <Tag size={14} /> {k}
                     </button>
@@ -171,7 +204,7 @@ export function VideoCardMenu({ video, inFeed = true }: Props) {
           </div>,
           document.body,
         )}
-      {explain && <ExplainDialog video={video} onClose={() => setExplain(false)} />}
+      {explain && <ExplainDialog video={video} onClose={() => setExplain(false)} returnFocus={btn} />}
     </>
   )
 }

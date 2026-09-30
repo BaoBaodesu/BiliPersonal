@@ -1,182 +1,190 @@
-"""
-模型生命周期：
-- 启动 / 登录后在后台线程准备模型：saved_model 与 history_hash 匹配时直接加载，否则训练。
-- 历史数据超过 HISTORY_TTL 才重新抓取；数据指纹变化才重训；用户可手动重训。
-- 训练期间继续使用旧模型提供推荐，训练完成后原子替换。
-"""
-
-import hashlib
+"""后台收集和训练；活动模型与候选模型独立。"""
 import json
 import os
 import threading
 import time
 import traceback
-
-from backend.config import FAV_MAX, HISTORY_LEN, HISTORY_PATH, HISTORY_TTL, MODEL_DIR
-from backend.services.bilibili_service import BiliError, LoginExpired, bili
-
-META_PATH = os.path.join(MODEL_DIR, "meta.json")
-WEIGHTS_PATH = os.path.join(MODEL_DIR, "best_model.weights.h5")
-PROCESSOR_PATH = os.path.join(MODEL_DIR, "feature_processor.pkl")
-
-
-def history_hash(history):
-    """数据指纹：BVID + progress + isliked + isfaved"""
-    keys = sorted(
-        f"{v.get('bvid')}|{v.get('progress')}|{v.get('isliked')}|{v.get('isfaved')}" for v in history
-    )
-    return hashlib.sha256("\n".join(keys).encode("utf-8")).hexdigest()[:16]
+import uuid
+from backend.config import HISTORY_PATH, MODEL_DIR
+from backend.services.bilibili_service import bili, LoginExpired, RateLimited
+from backend.services.model_registry import registry
+from backend.services.training_data import PROTOCOL, build_samples, fingerprint
+from backend.storage.database import connect, get_state
 
 
 def read_meta():
-    if not os.path.exists(META_PATH):
+    try:
+        with open(os.path.join(MODEL_DIR, "meta.json"), encoding="utf-8") as file:
+            return json.load(file)
+    except (OSError, ValueError):
         return {}
-    with open(META_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
 
 
 class TrainingService:
     def __init__(self):
         self.recommender = None
         self.model_version = None
-        # none / collecting / training / ready / error
         self.stage = "none"
         self.progress = {"epoch": 0, "total": 0}
         self.error = None
         self.history_samples = 0
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._thread = None
         self._listeners = []
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._force_refresh = False
+        self._force_train = False
 
     def on_model_changed(self, callback):
         self._listeners.append(callback)
 
     @property
     def busy(self):
-        return self._thread is not None and self._thread.is_alive()
+        return self.stage in ("collecting", "training")
 
     def status(self):
         meta = read_meta()
-        return {
-            "model": "ready" if self.recommender else self.stage,
-            "stage": self.stage,
-            "training": self.stage in ("collecting", "training"),
-            "progress": self.progress,
-            "error": self.error,
-            "model_version": self.model_version,
-            "trained_at": meta.get("trained_at"),
-            "history_hash": meta.get("history_hash"),
-            "history_samples": self.history_samples,
-            "history_updated_at": os.path.getmtime(HISTORY_PATH) if os.path.exists(HISTORY_PATH) else None,
-            "summary": meta.get("summary"),
-        }
+        state = registry.state()
+        if self.model_version and not self.model_version.startswith("baseline-"):
+            try:
+                bundle = registry.metadata(self.model_version)
+                meta = {"trained_at":bundle["created_at"], "history_hash":bundle["data_hash"],
+                        "summary":{"samples":bundle["samples"],"positives":bundle["positives"],
+                                   "best_loss":bundle["metrics"]["loss"],"final_metrics":bundle["metrics"],
+                                   "num_tags":len(self.recommender.processor.tag2idx),"num_authors":len(self.recommender.processor.author2idx)}}
+            except (OSError, ValueError, KeyError) as error:
+                self.error = str(error)
+        return {"model": "ready" if self.recommender else self.stage, "stage": self.stage,
+                "training": self.busy, "progress": self.progress, "error": self.error,
+                "model_version": self.model_version, "trained_at": meta.get("trained_at"),
+                "history_hash": meta.get("history_hash"), "history_samples": self.history_samples,
+                "history_updated_at": os.path.getmtime(HISTORY_PATH) if os.path.exists(HISTORY_PATH) else None,
+                "summary": meta.get("summary"), "v03":state}
 
     def reset(self):
-        """退出登录时调用：清空内存中的模型"""
+        self._stop.set()
+        self._wake.set()
         with self._lock:
             self.recommender = None
             self.model_version = None
             self.stage = "none"
-            self.progress = {"epoch": 0, "total": 0}
-            self.error = None
 
     def ensure_started(self, force_refresh=False, force_train=False):
-        """幂等：已有后台任务在跑时直接返回"""
         with self._lock:
-            if self.busy:
+            self._force_refresh |= force_refresh
+            self._force_train |= force_train
+            self._wake.set()
+            if self._thread and self._thread.is_alive():
+                if self._stop.is_set():
+                    worker = self._thread
+                    def resume():
+                        worker.join()
+                        self.ensure_started()
+                    threading.Thread(target=resume,name="model-resume",daemon=True).start()
+                    return True
                 return False
-            self._thread = threading.Thread(
-                target=self._run, args=(force_refresh, force_train), name="model-lifecycle", daemon=True
-            )
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run, name="model-lifecycle", daemon=True)
             self._thread.start()
             return True
 
-    # ---------------- 后台流程 ----------------
-
-    def _run(self, force_refresh, force_train):
-        try:
-            from backend.recommender.recommender import Recommender, read_history
-
-            history = read_history()
-            meta = read_meta()
-
-            # 1) 先用已保存的模型快速就绪（指纹匹配时）
-            if self.recommender is None and history and self._model_files_exist():
-                if meta.get("history_hash") == history_hash(history):
-                    self._load(Recommender, history, meta)
-
-            # 2) 历史数据过期或不存在时重新抓取
-            stale = not history or time.time() - os.path.getmtime(HISTORY_PATH) > HISTORY_TTL
-            if force_refresh or stale:
-                self.stage = "collecting"
-                try:
-                    history = bili.collect_training_history(HISTORY_LEN, FAV_MAX)
-                except LoginExpired:
-                    raise
-                except BiliError as e:
-                    print(f"历史数据抓取失败，继续使用本地数据：{e}")
-                    history = read_history()
-            self.history_samples = len(history)
-            if not history:
-                raise RuntimeError("没有可用的历史数据（观看历史与收藏均为空）")
-
-            # 3) 指纹变化或手动要求时重训，否则直接加载
-            new_hash = history_hash(history)
-            if not force_train and meta.get("history_hash") == new_hash and self._model_files_exist():
-                if self.recommender is None:
-                    self._load(Recommender, history, meta)
-                self.stage = "ready"
-                return
-
-            self.stage = "training"
-            self.progress = {"epoch": 0, "total": 30}
-
-            def on_epoch(epoch, total, loss, metrics):
-                self.progress = {"epoch": epoch, "total": total, "loss": loss}
-
-            recommender, summary = Recommender.train(progress_callback=on_epoch)
-            meta = {
-                "history_hash": new_hash,
-                "max_tags": recommender.max_tags,
-                "trained_at": time.time(),
-                "summary": summary,
-            }
-            with open(META_PATH, "w", encoding="utf-8") as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
-            self._set_recommender(recommender, meta)
-            self.stage = "ready"
-        except LoginExpired:
-            self.stage = "error"
-            self.error = "login_expired"
-        except Exception as e:
-            traceback.print_exc()
-            self.stage = "ready" if self.recommender else "error"
-            self.error = str(e)
-
-    def _model_files_exist(self):
-        return os.path.exists(WEIGHTS_PATH) and os.path.exists(PROCESSOR_PATH)
-
-    def _load(self, Recommender, history, meta):
-        max_tags = meta.get("max_tags") or max(len(v["tag"]) for v in history)
-        try:
-            recommender = Recommender.load(max_tags)
-        except Exception as e:
-            print(f"加载已保存模型失败，将重新训练：{e}")
-            return
-        self.history_samples = len(history)
-        self._set_recommender(recommender, meta)
-        self.stage = "ready"
-        print("已从 saved_model 直接加载模型")
-
-    def _set_recommender(self, recommender, meta):
-        self.recommender = recommender
-        self.model_version = time.strftime("%Y%m%d-%H%M%S", time.localtime(meta.get("trained_at") or time.time()))
-        self.error = None
-        for callback in self._listeners:
+    def _load_active(self):
+        registry.capture_baseline()
+        state = registry.state()
+        failures = []
+        for version in dict.fromkeys(v for v in (state.get("active"), state.get("previous"), state.get("baseline")) if v):
             try:
-                callback()
-            except Exception:
+                bundle = registry.load(version)
+                if bundle is None:
+                    continue
+                if self._stop.is_set():
+                    return
+                if version != state.get("active"):
+                    registry.update(active=version, auto_paused=True, load_error="; ".join(failures))
+                with self._lock:
+                    self.recommender, self.model_version = bundle, version
+                self.stage = "ready"
+                self.history_samples = registry.metadata(version).get("samples") or read_meta().get("summary", {}).get("samples", 0)
+                self.error = "; ".join(failures) or None
+                for callback in self._listeners:
+                    try:
+                        callback()
+                    except Exception:
+                        traceback.print_exc()
+                return
+            except Exception as error:
+                failures.append(f"{version}: {error}")
+        self.stage = "error"
+        self.error = "; ".join(failures) or "没有可验证的旧模型，使用候选原始顺序"
+        registry.update(active="fallback-v03", previous=state.get("active"), auto_paused=True, load_error=self.error)
+
+    def _cycle(self, force_refresh=False, force_train=False):
+        from backend.services.history_sync import sync
+        from backend.services.evaluation_service import evaluation
+        from backend.recommender.ranker_v03 import Ranker
+        self.stage = "collecting"
+        sync.run(force=force_refresh, page_budget=2, stop=self._stop)
+        if self._stop.is_set():
+            return
+        cutoff = time.time()
+        samples = build_samples(cutoff)
+        self.history_samples = len(samples)
+        signature = fingerprint(samples)
+        with connect() as conn:
+            previous = conn.execute("SELECT data_hash FROM model_runs WHERE finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1").fetchone()
+        if (force_train or get_state("v03_history_sync", {}).get("complete")) and (force_train or not previous or previous[0] != signature) and len(samples) >= 25 and len({s["label"] for s in samples[:int(len(samples)*.8)]}) == 2:
+            self.stage = "training"
+            def progress(epoch, total, loss, result):
+                if self._stop.is_set():
+                    raise RuntimeError("训练已取消")
+                self.progress = {"epoch": epoch, "total": total, "loss": loss}
+            version = "ranker-v03-" + uuid.uuid4().hex[:16]
+            with connect() as conn:
+                conn.execute("INSERT INTO model_runs(model_version,protocol,status,data_cutoff_at,started_at,finished_at,data_hash,artifact_path,metrics,config) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                             (version, PROTOCOL, "training", cutoff, cutoff, None, signature,
+                              str(registry.directory(version)), None, json.dumps({"samples":len(samples),"positives":sum(s["label"] for s in samples)})))
+            try:
+                _, metadata = Ranker.train(samples, registry, cutoff, callback=progress, version=version)
+            except Exception as error:
+                with connect() as conn:
+                    conn.execute("UPDATE model_runs SET status='failed',finished_at=?,metrics=? WHERE model_version=?", (time.time(),json.dumps({"error":str(error)}),version))
+                raise
+            with connect() as conn:
+                conn.execute("UPDATE model_runs SET status='candidate',finished_at=?,metrics=?,config=? WHERE model_version=?", (time.time(),json.dumps(metadata["metrics"]),json.dumps(metadata),version))
+            evaluation.start(metadata["version"])
+        evaluation.check()
+        from backend.services.experiment_service import experiments
+        experiments.check()
+        self.stage = "ready" if self.recommender else "error"
+
+    def _run(self):
+        with connect() as conn:
+            conn.execute("UPDATE model_runs SET status='failed',finished_at=?,metrics=? WHERE status='training'", (time.time(),json.dumps({"error":"服务退出导致训练中断"}),))
+        try:
+            self._load_active()
+        except Exception as error:
+            self.stage = "error"
+            self.error = str(error)
+            return
+        while not self._stop.is_set():
+            with self._lock:
+                force_refresh, force_train = self._force_refresh, self._force_train
+                self._force_refresh = self._force_train = False
+                self._wake.clear()
+            try:
+                self._cycle(force_refresh, force_train)
+            except LoginExpired:
+                self.error = "login_expired"
+                self.stage = "ready" if self.recommender else "error"
+                return
+            except Exception as error:
+                if self._stop.is_set():
+                    return
                 traceback.print_exc()
+                self.error = str(error)
+                self.stage = "ready" if self.recommender else "error"
+            self._wake.wait(max(60, bili.rate_limited_until - time.time()))
 
 
 training = TrainingService()

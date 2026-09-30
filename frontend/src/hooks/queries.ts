@@ -7,7 +7,7 @@ import type { FeedbackAction, FeedPage, FeedType, Video } from '../types'
 export const keys = {
   auth: ['auth'] as const,
   status: ['system', 'status'] as const,
-  feed: (type: FeedType, category: string) => ['feed', type, category] as const,
+  feed: (type: FeedType, category: string, viewId?: string) => ['feed', type, category, viewId] as const,
   categories: ['feed', 'categories'] as const,
   filters: ['filters'] as const,
   interests: ['interests'] as const,
@@ -26,10 +26,12 @@ export function useSystemStatus() {
   })
 }
 
-export function useFeed(type: FeedType, category: string) {
+export function useFeed(type: FeedType, category: string, viewId?: string) {
+  const qc = useQueryClient()
   return useInfiniteQuery({
-    queryKey: keys.feed(type, category),
-    queryFn: ({ pageParam }) => api.feed.get(type, category, pageParam),
+    queryKey: keys.feed(type, category, viewId),
+    queryFn: ({ pageParam }) => api.feed.get(type, category, pageParam, 12,
+      qc.getQueryData<InfiniteData<FeedPage>>(keys.feed(type, category, viewId))?.pages[0]?.view_id ?? viewId),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => (last.has_more ? last.next_cursor : undefined),
     staleTime: Infinity,
@@ -38,25 +40,26 @@ export function useFeed(type: FeedType, category: string) {
 }
 
 // 换一批：新建 stream，替换当前 Feed 的第一页
-export function useRefreshFeed(type: FeedType, category: string) {
+export function useRefreshFeed(type: FeedType, category: string, viewId?: string) {
   const qc = useQueryClient()
   return useMutation({
     mutationKey: ['refresh-feed'],
     mutationFn: () => api.feed.refresh(type, category),
     onSuccess: (page) => {
-      qc.setQueryData<InfiniteData<FeedPage, string | null>>(keys.feed(type, category), {
+      qc.setQueryData<InfiniteData<FeedPage, string | null>>(keys.feed(type, category, viewId), {
         pages: [page],
         pageParams: [null],
       })
-      window.scrollTo({ top: 0, behavior: 'smooth' })
+      window.scrollTo({ top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })
     },
+    onError: () => useToast.getState().show('换批失败，已保留当前推荐，请稍后重试'),
   })
 }
 
 // 模型从未就绪变为就绪时，自动刷新当前 Feed（未排序 → 模型排序）
-export function useAutoUpgradeFeed(type: FeedType, category: string, ranked: boolean | undefined) {
+export function useAutoUpgradeFeed(type: FeedType, category: string, ranked: boolean | undefined, viewId?: string) {
   const { data: status } = useSystemStatus()
-  const refresh = useRefreshFeed(type, category)
+  const refresh = useRefreshFeed(type, category, viewId)
   const ready = status?.model === 'ready'
   useEffect(() => {
     if (ready && ranked === false && !refresh.isPending) refresh.mutate()
@@ -64,7 +67,7 @@ export function useAutoUpgradeFeed(type: FeedType, category: string, ranked: boo
   }, [ready, ranked])
 }
 
-// 从所有 Feed 缓存中移除某些视频（反馈后立即生效）
+// 从所有 Feed 缓存中移除某些视频，仅在反馈成功后调用。
 function removeFromFeeds(qc: ReturnType<typeof useQueryClient>, predicate: (v: Video) => boolean) {
   qc.setQueriesData<InfiniteData<FeedPage>>({ queryKey: ['feed'] }, (data) => {
     if (!data?.pages) return data
@@ -78,14 +81,12 @@ export function useFeedback() {
   return useMutation({
     mutationFn: ({ video, action }: { video: Video; action: FeedbackAction }) =>
       api.feedback.send(video.bvid, action, video),
-    onMutate: ({ video, action }) => {
+    onSuccess: (_, { video, action }) => {
       if (action === 'not_interested' || action === 'watched') {
         removeFromFeeds(qc, (v) => v.bvid === video.bvid)
       } else if (action === 'block_up') {
         removeFromFeeds(qc, (v) => v.author === video.author || (!!video.mid && v.mid === video.mid))
       }
-    },
-    onSuccess: (_, { video, action }) => {
       const messages: Partial<Record<FeedbackAction, string>> = {
         not_interested: '已减少此类推荐',
         block_up: `已屏蔽 UP：${video.author}`,
@@ -105,7 +106,7 @@ export function useFeedback() {
                 api.feedback.send(video.bvid, 'undo', video).then(() => {
                   qc.invalidateQueries({ queryKey: keys.filters })
                   toast('已撤销，下一批推荐中生效')
-                }),
+                }).catch(() => toast('撤销失败，请稍后重试')),
             }
           : undefined,
       )
@@ -126,6 +127,7 @@ export function useBlockKeyword() {
       qc.invalidateQueries({ queryKey: keys.filters })
       toast(`已屏蔽关键词：${rule.keyword}`)
     },
+    onError: () => toast('屏蔽关键词失败，请稍后重试'),
   })
 }
 

@@ -16,6 +16,7 @@ export const FEED_PATHS: Record<string, 'for_you' | 'hot' | 'explore'> = {
 export function Header() {
   const toggleSidebar = useUi((s) => s.toggleSidebar)
   const setMobileSidebar = useUi((s) => s.setMobileSidebar)
+  const sidebarOpen = useUi((s) => window.innerWidth < 1024 ? s.mobileSidebar : s.sidebarExpanded)
   const navigate = useNavigate()
   const location = useLocation()
   const [params] = useSearchParams()
@@ -30,13 +31,18 @@ export function Header() {
     if (location.pathname === '/search') setQ(params.get('q') || '')
   }, [location.pathname, params])
 
+  useEffect(() => {
+    if (mobileSearch) input.current?.focus()
+  }, [mobileSearch])
+
   // 键盘操作：/ 聚焦搜索
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement
-      if (e.key === '/' && !['INPUT', 'TEXTAREA'].includes(t.tagName)) {
+      if (e.key === '/' && !e.defaultPrevented && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !t.isContentEditable && !t.closest('[role="dialog"], [role="menu"]') && !['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName)) {
         e.preventDefault()
-        input.current?.focus()
+        if (window.innerWidth < 640) setMobileSearch(true)
+        else input.current?.focus()
       }
     }
     document.addEventListener('keydown', onKey)
@@ -62,7 +68,7 @@ export function Header() {
 
   const searchForm = (
     <form onSubmit={submit} role="search" className="flex w-full max-w-[640px] items-center">
-      <div className="flex h-10 flex-1 items-center rounded-l-full border border-line bg-bg pr-2 pl-4 focus-within:border-accent">
+      <div className="flex h-11 min-w-0 flex-1 items-center rounded-l-full border border-line bg-bg pl-4 focus-within:border-accent">
         <input
           ref={input}
           value={q}
@@ -72,7 +78,7 @@ export function Header() {
           className="h-full w-full bg-transparent text-base text-fg outline-none placeholder:text-subtle"
         />
         {q && (
-          <button type="button" aria-label="清除" onClick={() => setQ('')} className="rounded-full p-1 hover:bg-surface-hover">
+          <button type="button" aria-label="清除" onClick={() => { setQ(''); input.current?.focus() }} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full hover:bg-surface-hover">
             <X size={18} />
           </button>
         )}
@@ -80,7 +86,7 @@ export function Header() {
       <button
         type="submit"
         aria-label="搜索"
-        className="flex h-10 w-16 items-center justify-center rounded-r-full border border-l-0 border-line bg-surface hover:bg-surface-hover"
+        className="flex h-11 w-14 shrink-0 items-center justify-center rounded-r-full border border-l-0 border-line bg-surface hover:bg-surface-hover sm:w-16"
       >
         <Search size={20} />
       </button>
@@ -90,7 +96,7 @@ export function Header() {
   if (mobileSearch) {
     return (
       <header className="fixed inset-x-0 top-0 z-40 flex h-14 items-center gap-2 bg-bg px-2">
-        <button aria-label="返回" onClick={() => setMobileSearch(false)} className="rounded-full p-2 hover:bg-surface-hover">
+        <button aria-label="返回" onClick={() => setMobileSearch(false)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full hover:bg-surface-hover">
           <ArrowLeft size={22} />
         </button>
         {searchForm}
@@ -99,12 +105,13 @@ export function Header() {
   }
 
   return (
-    <header className="fixed inset-x-0 top-0 z-40 flex h-14 items-center justify-between gap-4 bg-bg px-4">
-      <div className="flex shrink-0 items-center gap-2">
+    <header className="fixed inset-x-0 top-0 z-40 flex h-14 items-center justify-between gap-2 bg-bg px-2 sm:gap-4 sm:px-4">
+      <div className="flex shrink-0 items-center gap-1 sm:gap-2">
         <button
           aria-label="菜单"
+          aria-expanded={sidebarOpen}
           onClick={() => (window.innerWidth < 1024 ? setMobileSidebar(true) : toggleSidebar())}
-          className="rounded-full p-2 hover:bg-surface-hover"
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full hover:bg-surface-hover"
         >
           <Menu size={22} />
         </button>
@@ -115,20 +122,20 @@ export function Header() {
         <button
           aria-label="搜索"
           onClick={() => setMobileSearch(true)}
-          className="rounded-full p-2 hover:bg-surface-hover sm:hidden"
+          className="flex h-11 w-11 items-center justify-center rounded-full hover:bg-surface-hover sm:hidden"
         >
           <Search size={22} />
         </button>
-        <ModelStatus />
-        <button
+        {!onFeed && <div className="hidden md:block"><ModelStatus /></div>}
+        {!onFeed && <button
           onClick={refresh}
-          title={onFeed ? '换一批 (R)' : '刷新'}
-          aria-label="刷新推荐"
+          title="刷新"
+          aria-label="刷新当前页面"
           disabled={refreshing}
-          className="rounded-full p-2 hover:bg-surface-hover disabled:opacity-60"
+          className="flex h-11 w-11 items-center justify-center rounded-full hover:bg-surface-hover disabled:opacity-60"
         >
           <RefreshCw size={20} className={refreshing ? 'animate-spin' : ''} />
-        </button>
+        </button>}
         <div className="ml-1">
           <UserAvatar />
         </div>

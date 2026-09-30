@@ -13,7 +13,7 @@ export function LoginPage() {
   const [status, setStatus] = useState<'waiting' | 'scanned' | 'expired' | 'success' | 'error'>('waiting')
 
   useEffect(() => {
-    document.title = '登录 - BiliFeed'
+    document.title = '登录 - BiliPersonal'
   }, [])
 
   useEffect(() => {

@@ -1,5 +1,66 @@
 # BiliPersonal｜个人化 B 站推荐器
 
+## 日常一键启动（Windows）
+
+完成下方环境配置后，双击根目录的 **`启动BiliPersonal.bat`**，或在 PowerShell 中执行：
+
+```powershell
+.\启动BiliPersonal.bat
+```
+
+脚本检查 `.venv`、Node/npm 和前端依赖，每次先构建最新前端，再使用项目虚拟环境启动后端。打开 `http://127.0.0.1:8345` 使用；保留启动窗口查看日志，按 **Ctrl+C** 停止服务，若出现终止批处理的确认提示，输入 **Y** 并回车。
+
+缺少环境、构建失败或端口不可用时，脚本显示错误并停止，不自动安装依赖或结束已有进程。首次安装前端依赖可在 `frontend` 目录执行 `npm ci`。下方保留手动启动及前端热更新的开发方式。
+
+## v0.3 推荐闭环与模型管理
+
+实施约定见 [v0.3_PLAN.md](v0.3_PLAN.md)，验收记录见 [docs/v0.3_validation.md](docs/v0.3_validation.md)。SQLite 采用增量迁移，旧推荐流水保留；`historyVideo.json`、根目录旧权重和处理器不会被新训练覆盖。首次加载会把当前磁盘 v0.2 工件复制为不可变基线，`saved_model/active.json` 管理活动版本。
+
+启动且已登录后，后台渐进收集最多 1000 个不同观看视频及 200 个收藏，保存分页断点并对风控退避；完成后每日增量同步。新训练使用每个 BV 一条证据加权样本、按行为时间 80/20 验证、重载最佳验证 checkpoint。新工件先进入冻结评价或最新待评队列，当前模型继续提供 Feed。未点击曝光只用于观察，屏蔽 UP 只作精确过滤。
+
+前端只增加位置归因与无界面采集：50% 可见、前台连续 1 秒才记录曝光；点击立即打开 B 站，网络重试沿用事件 ID。快速操作保留主动操作时间，可见时间留空。旧生成记录不会补造为曝光。
+
+在项目根目录执行以下命令。**切换、训练、评价和准入命令前先 Ctrl+C 停止服务**；命令会检查 8345 端口，完成后用启动脚本重新启动。
+
+```powershell
+.venv\Scripts\python.exe modelctl.py list
+.venv\Scripts\python.exe modelctl.py rollback
+.venv\Scripts\python.exe modelctl.py switch 已批准的版本名
+.venv\Scripts\python.exe modelctl.py train
+.venv\Scripts\python.exe modelctl.py evaluate
+```
+
+`rollback` 默认切换到前一版，`switch` 可选已批准版本或保存的 v0.2 基线；不会清除反馈、候选、过滤或观看历史。活动工件加载失败会尝试验证前一版和基线；全部失败时明确报错并按候选顺序降级，不能假报模型 ready。已有 stream 保持原模型版本，下一次浏览使用新活动版本。
+
+首次准入：在五个不同时间正常浏览、更新候选池后，分别停止服务执行 `modelctl.py blind-capture`。未更新候选池不能重复填满五批。命令输出 `saved_model/blind/<评价ID>/rating.json`；为每项填写 `score`（3=非常想看、2=想看、1=一般、0=不想看、-1=强烈排斥），可分次完成，已有评分会保留。
+
+```powershell
+.venv\Scripts\python.exe modelctl.py blind-report
+# 用户查看报告并明确确认在线试用后，才执行：
+.venv\Scripts\python.exe modelctl.py approve-trial
+# 异常时提前停止并继续当前模型：
+.venv\Scripts\python.exe modelctl.py stop-trial
+```
+
+盲评报告包含想看率、低分率、共同候选池的 NDCG@10 和批次差异。首次试用只在个性化首页“全部”按新浏览批次等量分组；分页和重试不换模型。前向验证须包含至少 100 个不同视频、正负各 20 个，验证证据晚于模型冻结及训练截止；不复用训练、内部验证或已消费的发布集合。正式发布同时要求配对 AP 非劣、证据加权 loss 相对增加不超过 2%、至少 7 天和每组 20 次有效浏览/500 个展示机会/100 个不同视频，以及两项负反馈率观测值不升。
+
+服务按固定 UTC 每日结算点先检查数量，首次同时达到全部条件时只正式判定一次，并保存不可变报告。零反馈和退化置信区间会注明证据不足。后续同协议通过离线及产品护栏才自动切换；失败暂停自动晋升，需人工判断。已结束且封存的模型对可用 `modelctl.py finish` 开启最新待评版本；运行中的试用不能跳过结算。更改标签、权重或评价语义需重新人工确认。
+
+Quality 与排序策略实验默认关闭，分别使用 `modelctl.py train --quality` 或 `modelctl.py train --diversity` 创建独立候选，不能在同一实验同时启用两项。策略收益仍须通过盲评/在线产品护栏，不以模型 AP 不变宣称有效。时间衰减及新向量主干留待 v0.4。
+
+验收命令（临时 SQLite、固定样本、假接口，不调用真实 B 站）：
+
+```powershell
+.venv\Scripts\python.exe -W ignore -m unittest discover -s backend/tests -p test_v03.py -v
+cd frontend
+node tests/telemetry.cjs
+npm run build
+```
+
+以下原项目的特征和指标说明主要描述保留的 v0.2 基线；当前 v0.3 训练和发布以本节及定稿计划为准。
+
+---
+
 本地优先的 B 站个性化推荐客户端。从 Bilibili 获取候选视频与用户行为数据，在**你自己的机器上**构建兴趣画像、执行过滤规则、训练推荐模型并完成排序，最终以一个类似现代视频平台的信息流界面呈现。
 
 项目的目标不是复刻 Bilibili 官方推荐算法，而是让用户拥有更多控制权。
@@ -79,7 +140,7 @@ uv venv --python 3.11 --seed .venv
 ### 2. 启动后端
 
 ```powershell
-python run.py
+.\.venv\Scripts\python.exe run.py
 ```
 
 监听 `http://127.0.0.1:8345`。**仅绑定本机回环地址**，不要改成 `0.0.0.0`。

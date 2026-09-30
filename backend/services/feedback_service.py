@@ -10,6 +10,7 @@ from backend.services.filter_service import (
     TARGET_TITLE,
     FilterError,
     filters,
+    _bump_filter_version,
 )
 from backend.storage.database import connect, now, rows_to_dicts
 
@@ -23,51 +24,78 @@ class FeedbackError(Exception):
 
 
 class FeedbackService:
-    def record(self, bvid, action, video=None):
+    def record(self, bvid, action, video=None, context=None):
         if action not in ACTIONS:
             raise FeedbackError(f"unknown action: {action}")
         video = video or {}
+        context = context or {}
+        if context.get("event_id") is not None and (not isinstance(context["event_id"], str) or not 1 <= len(context["event_id"]) <= 128):
+            raise FeedbackError("非法反馈事件标识")
         with connect() as conn:
+            if context.get("event_id"):
+                existing = conn.execute("SELECT bvid,action,recommendation_id FROM feedback WHERE event_id=?", (context["event_id"],)).fetchone()
+                if existing:
+                    if existing["bvid"] != bvid or existing["action"] != action or existing["recommendation_id"] != context.get("recommendation_id"):
+                        raise FeedbackError("反馈事件标识冲突")
+                    return {"ok": True}
             if action == "undo":
+                from backend.services.exposure_service import associate
+                try:
+                    associated = associate(conn, context, bvid)
+                except ValueError as e:
+                    raise FeedbackError(str(e)) from e
                 # 撤销该视频最近一次隐藏类反馈
                 row = conn.execute(
-                    f"SELECT id, action FROM feedback WHERE bvid = ? AND action IN ({','.join('?' * len(HIDING_ACTIONS))}) "
+                    f"SELECT id, action,blocked_up_id,video,recommendation_id FROM feedback WHERE revoked_at IS NULL AND bvid = ? AND action IN ({','.join('?' * len(HIDING_ACTIONS))}) "
                     "ORDER BY id DESC LIMIT 1",
                     (bvid, *HIDING_ACTIONS),
                 ).fetchone()
                 if row:
-                    conn.execute("DELETE FROM feedback WHERE id = ?", (row["id"],))
-                    if row["action"] == "block_up" and video.get("author"):
-                        conn.execute("DELETE FROM blocked_ups WHERE name = ?", (video["author"],))
-                    conn.execute(
-                        "UPDATE recommendation_history SET feedback = NULL WHERE bvid = ?", (bvid,)
-                    )
+                    conn.execute("UPDATE feedback SET revoked_at=? WHERE id=?", (now(),row["id"]))
+                    saved = json.loads(row["video"] or "{}")
+                    if row["action"] == "block_up":
+                        if row["blocked_up_id"]:
+                            conn.execute("DELETE FROM blocked_ups WHERE id=?", (row["blocked_up_id"],))
+                        elif row["recommendation_id"] is None and saved.get("author"):
+                            conn.execute("DELETE FROM blocked_ups WHERE name=?", (saved["author"],))
+                        _bump_filter_version(conn)
+                        filters.invalidate()
+                    if row["recommendation_id"]:
+                        conn.execute("UPDATE recommendation_history SET feedback=NULL WHERE id=?", (row["recommendation_id"],))
+                conn.execute("INSERT INTO feedback(bvid,action,video,created_at,event_id,recommendation_id,exposure_id) VALUES(?,'undo',?,?,?,?,?)", (bvid,json.dumps(_brief(video),ensure_ascii=False),now(),context.get("event_id"),context.get("recommendation_id"),associated[1] if associated else None))
                 return {"undone": bool(row)}
 
-            if action == "click":
-                conn.execute("UPDATE recommendation_history SET clicked = 1 WHERE bvid = ?", (bvid,))
-            else:
-                conn.execute(
-                    "UPDATE recommendation_history SET feedback = ? WHERE bvid = ?", (action, bvid)
-                )
-            conn.execute(
-                "INSERT INTO feedback(bvid, action, video, created_at) VALUES(?, ?, ?, ?)",
-                (bvid, action, json.dumps(_brief(video), ensure_ascii=False), now()),
+            from backend.services.exposure_service import associate
+            try:
+                associated = associate(conn, context, bvid, click=action == "click", action=True)
+            except ValueError as e:
+                raise FeedbackError(str(e)) from e
+            if associated:
+                video = {**video, **json.loads(associated[0]["video_snapshot"] or "{}")}
+                conn.execute("UPDATE recommendation_history SET " + ("clicked = 1" if action == "click" else "feedback = ?") + " WHERE id = ?",
+                             (associated[0]["id"],) if action == "click" else (action, associated[0]["id"]))
+            result = conn.execute(
+                "INSERT INTO feedback(bvid, action, video, created_at,recommendation_id,exposure_id,event_id) VALUES(?, ?, ?, ?,?,?,?)",
+                (bvid, action, json.dumps(_brief(video), ensure_ascii=False), now(), context.get("recommendation_id"),
+                 associated[1] if associated else None, context.get("event_id")),
             )
             if action == "block_up" and video.get("author"):
                 exists = conn.execute(
-                    "SELECT 1 FROM blocked_ups WHERE name = ? OR (mid IS NOT NULL AND mid = ?)",
+                    "SELECT 1 FROM blocked_ups WHERE (mid IS NULL AND name = ?) OR mid = ?",
                     (video["author"], video.get("mid")),
                 ).fetchone()
                 if not exists:
-                    conn.execute(
+                    blocked = conn.execute(
                         "INSERT INTO blocked_ups(mid, name, created_at) VALUES(?, ?, ?)",
                         (video.get("mid"), video["author"], now()),
                     )
+                    conn.execute("UPDATE feedback SET blocked_up_id=? WHERE id=?", (blocked.lastrowid,result.lastrowid))
+                    _bump_filter_version(conn)
+                    filters.invalidate()
         return {"ok": True}
 
     def history(self, action=None, limit=100, offset=0):
-        sql = "SELECT * FROM feedback WHERE action != 'click'"
+        sql = "SELECT * FROM feedback WHERE action NOT IN ('click','undo') AND revoked_at IS NULL"
         params = []
         if action:
             sql += " AND action = ?"
@@ -82,7 +110,12 @@ class FeedbackService:
 
     def remove(self, feedback_id):
         with connect() as conn:
-            conn.execute("DELETE FROM feedback WHERE id = ?", (feedback_id,))
+            row = conn.execute("SELECT action,blocked_up_id FROM feedback WHERE id=? AND revoked_at IS NULL", (feedback_id,)).fetchone()
+            conn.execute("UPDATE feedback SET revoked_at=? WHERE id=?", (now(),feedback_id))
+            if row and row["action"] == "block_up" and row["blocked_up_id"]:
+                conn.execute("DELETE FROM blocked_ups WHERE id=?", (row["blocked_up_id"],))
+                _bump_filter_version(conn)
+                filters.invalidate()
 
     def watch_later(self):
         return self.history("watch_later", limit=200)
@@ -119,7 +152,7 @@ class FeedbackService:
         """兼容读取接口：统一由 filter_service 提供，避免出现两套独立数据源。"""
         with connect() as conn:
             hidden = conn.execute(
-                f"SELECT DISTINCT bvid FROM feedback WHERE action IN ({','.join('?' * len(HIDING_ACTIONS))})",
+                f"SELECT DISTINCT bvid FROM feedback WHERE revoked_at IS NULL AND action IN ({','.join('?' * len(HIDING_ACTIONS))})",
                 HIDING_ACTIONS,
             ).fetchall()
         rules = filters.load_rules()
@@ -133,7 +166,9 @@ class FeedbackService:
 
 
 def _brief(video):
-    keys = ("bvid", "title", "pic", "author", "mid", "duration", "view", "tname")
+    keys = ("bvid", "title", "pic", "author", "mid", "duration", "view", "tname", "tag", "tags",
+            "like", "favorite", "coin", "reply", "pubdate", "source", "share", "face", "aid", "rcmd_reason",
+            "progress", "isliked", "isfaved", "view_at", "fav_time")
     return {k: video.get(k) for k in keys if video.get(k) is not None}
 
 

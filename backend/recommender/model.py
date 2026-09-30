@@ -88,10 +88,12 @@ class AttentionLayer(keras.layers.Layer):
         )
         super(AttentionLayer, self).build(input_shape)
 
-    def call(self, inputs):
+    def call(self, inputs, mask=None):
         uit = tf.tensordot(inputs, self.W, axes=1)
         uit = tf.nn.tanh(uit)
         ait = tf.tensordot(uit, self.V, axes=1)
+        if mask is not None:
+            ait = tf.where(tf.expand_dims(mask, -1), ait, tf.cast(-1e9, ait.dtype))
         attention_weights = tf.nn.softmax(ait, axis=1)
         weighted_input = attention_weights * inputs
         output = tf.reduce_sum(weighted_input, axis=1)

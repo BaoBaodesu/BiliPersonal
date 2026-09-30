@@ -27,7 +27,7 @@ export function AppShell() {
           {auth.isError && (auth.error as { code?: string }).code === 'offline' ? (
             <OfflineState
               title="无法连接本地服务"
-              description="请确认 python run.py 正在运行（http://127.0.0.1:8345）。"
+              description="请在项目根目录运行“启动BiliPersonal.bat”，然后重试连接。"
               action={{ label: '重试', onClick: () => auth.refetch() }}
             />
           ) : (

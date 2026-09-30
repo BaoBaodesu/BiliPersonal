@@ -30,6 +30,8 @@ def init_db():
     with connect() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
+        from backend.storage.migrate_v03 import migrate
+        migrate(conn)
 
 
 def now():
