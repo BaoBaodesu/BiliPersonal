@@ -6,6 +6,8 @@ from backend.config import HISTORY_PATH
 from backend.services.bilibili_service import bili, RateLimited, BiliError, LoginExpired
 from backend.services.training_data import record_history
 from backend.storage.database import connect, get_state, set_state
+from backend.services import feed_performance as perf
+from backend.services import request_coordination as requests_scope
 
 
 class HistorySync:
@@ -47,6 +49,8 @@ class HistorySync:
                 enriched["isliked"] = None
         return enriched
 
+    @perf.background("history_sync")
+    @requests_scope.background
     def run(self, force=False, page_budget=10, stop=None):
         self.bootstrap()
         state = get_state("v03_history_sync", {})

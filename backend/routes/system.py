@@ -1,6 +1,6 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 
-from backend.routes.common import api, login_required
+from backend.routes.common import api, login_required, error
 from backend.services.bilibili_service import bili
 from backend.services.cache_service import pool
 from backend.services.recommendation_service import recommendation
@@ -48,3 +48,23 @@ def retrain():
 @login_required
 def debug():
     return jsonify({**recommendation.debug(), "model": training.status()})
+
+
+@bp.get("/sources")
+@api
+@login_required
+def sources():
+    from backend.services.source_mixer import settings, source_report
+    return jsonify({"settings": settings(), "report": source_report()})
+
+
+@bp.put("/sources")
+@api
+@login_required
+def set_sources():
+    from backend.services.source_mixer import update_settings, source_report
+    try:
+        value = update_settings(request.get_json(silent=True))
+    except ValueError as exception:
+        return error("bad_request", str(exception), 400)
+    return jsonify({"settings": value, "report": source_report()})

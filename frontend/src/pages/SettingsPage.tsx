@@ -3,23 +3,26 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Monitor, Moon, Sun, RotateCw } from 'lucide-react'
 import { api } from '../api/client'
 import { FilterEditor, type FilterTab } from '../components/FilterEditor'
-import { keys, useSystemStatus } from '../hooks/queries'
+import { keys, useSystemStatus, useSources } from '../hooks/queries'
 import { formatDateTime } from '../hooks/format'
 import { useUi, type Theme } from '../stores/ui'
+import type { SourceSettings, SourceLevel } from '../types'
 
 export function FiltersPage() {
   const [params, setParams] = useSearchParams()
   const raw = params.get('tab')
-  const tab: FilterTab = raw === 'ups' ? 'ups' : raw === 'uploader' ? 'uploader' : 'title'
+  const tab: FilterTab = raw === 'ups' || raw === 'uploader' || raw === 'tag' || raw === 'zone' ? raw : 'title'
   const tabs: [FilterTab, string][] = [
     ['title', '标题关键词'],
     ['uploader', 'UP 主关键词'],
+    ['tag', '标签'],
+    ['zone', '分区'],
     ['ups', '精确屏蔽 UP'],
   ]
   return (
     <div className="max-w-2xl">
       <h1 className="mb-6 pt-4 text-2xl font-bold">过滤规则</h1>
-      <div className="mb-6 flex gap-6 border-b border-line" role="tablist">
+      <div className="mb-6 flex flex-wrap gap-4 border-b border-line" role="tablist">
         {tabs.map(([id, name]) => (
           <button
             key={id}
@@ -36,8 +39,8 @@ export function FiltersPage() {
       </div>
       <FilterEditor tab={tab} />
       <p className="mt-8 text-xs text-muted">
-        过滤在推荐排序之前执行（精确屏蔽 UP → UP 关键词 → 标题关键词），同样作用于搜索结果。
-        规则变更会立即让已生成的 Feed 缓存失效。AI 内容过滤（LLM）将在后续版本作为可选模块加入。
+        过滤在推荐排序之前执行（精确屏蔽 UP → UP 关键词 → 标题关键词 → 标签 → 分区），同样作用于搜索结果。
+        硬屏蔽立即作用于缓存页；降权从新生成的页面开始生效。AI 内容过滤（LLM）将在后续版本作为可选模块加入。
       </p>
     </div>
   )
@@ -52,16 +55,16 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-function Toggle({ checked, onChange, label, hint }: { checked: boolean; onChange: (v: boolean) => void; label: string; hint?: string }) {
+function Toggle({ checked, onChange, label, hint, disabled }: { checked: boolean; onChange: (v: boolean) => void; label: string; hint?: string; disabled?: boolean }) {
   return (
-    <label className="flex cursor-pointer items-center justify-between gap-6 py-2">
+    <label className={`flex min-h-11 cursor-pointer items-center justify-between gap-6 py-2 ${disabled ? 'opacity-50' : ''}`}>
       <span>
         <span className="text-sm">{label}</span>
         {hint && <span className="block text-xs text-muted">{hint}</span>}
       </span>
       <span className="relative inline-flex shrink-0 items-center">
-        <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="peer sr-only" />
-        <span className="h-5 w-9 rounded-full bg-surface-hover transition peer-checked:bg-accent" />
+        <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} className="peer sr-only" />
+        <span className="h-5 w-9 rounded-full bg-surface-hover transition peer-checked:bg-accent peer-focus-visible:ring-2 peer-focus-visible:ring-accent" />
         <span className="absolute left-0.5 h-4 w-4 rounded-full bg-white transition peer-checked:translate-x-4" />
       </span>
     </label>
@@ -72,6 +75,11 @@ export function SettingsPage() {
   const ui = useUi()
   const qc = useQueryClient()
   const { data: status } = useSystemStatus()
+  const sources = useSources()
+  const saveSources = useMutation({
+    mutationFn: (value: Partial<SourceSettings>) => api.system.setSources(value),
+    onSuccess: (value) => qc.setQueryData(keys.sources, value),
+  })
   const retrain = useMutation({
     mutationFn: api.system.retrain,
     onSuccess: () => qc.invalidateQueries({ queryKey: keys.status }),
@@ -103,6 +111,44 @@ export function SettingsPage() {
             </button>
           ))}
         </div>
+      </Section>
+
+      <Section title="推荐来源">
+        {sources.isPending ? <div className="skeleton h-32 rounded-lg" /> : sources.isError ? (
+          <button onClick={() => sources.refetch()} className="min-h-11 text-sm text-accent">读取失败，点击重试</button>
+        ) : sources.data && (
+          <div className="space-y-3">
+            {([['hot', '热门榜'], ['rcmd', 'B 站推荐流']] as const).map(([key, label]) => (
+              <label key={key} className="flex min-h-11 items-center justify-between gap-4 text-sm">
+                {label}
+                <select value={sources.data.settings[key]} disabled={saveSources.isPending} onChange={(e) => saveSources.mutate({ [key]: e.target.value as SourceLevel })} className="h-11 rounded-lg border border-line bg-bg px-3 disabled:opacity-50">
+                  <option value="off">关闭</option>
+                  <option value="fallback">仅兜底</option>
+                  <option value="small">少量（每页 1 条）</option>
+                  <option value="standard">标准（每页 3 条）</option>
+                </select>
+              </label>
+            ))}
+            <Toggle checked={sources.data.settings.classic} onChange={(classic) => saveSources.mutate({ classic })} disabled={saveSources.isPending} label="经典首页" hint="使用原来的热门与推荐流排序路径" />
+            <p className="text-xs text-muted" role="status">{saveSources.isPending ? '正在保存…' : '修改后从下一次换一批开始生效；当前批次保持原设置。'}</p>
+            {saveSources.isError && <p className="text-sm text-danger" role="alert">保存失败：{saveSources.error.message}</p>}
+            <div className="pt-2">
+              <h3 className="mb-2 text-sm font-medium">最近 7 天 · 推荐来源</h3>
+              {sources.data.report.total ? (
+                <>
+                  <p className="mb-3 text-xs text-muted">共 {sources.data.report.total} 条；热门 + 推荐流占比 {(sources.data.report.sources.filter((s) => s.source === 'hot' || s.source === 'rcmd').reduce((sum, s) => sum + s.share, 0) * 100).toFixed(1)}%</p>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs tabular-nums">
+                      <thead><tr className="text-muted"><th className="py-2 font-normal">来源</th><th className="py-2 font-normal">占比</th><th className="py-2 font-normal">点击率</th><th className="py-2 font-normal">不感兴趣率</th></tr></thead>
+                      <tbody>{sources.data.report.sources.map((s) => <tr key={s.source} className="border-t border-line"><td className="py-3">{{ follow: '关注新作', related: '相关视频', up_archive: '常看旧作', rcmd: '推荐流', hot: '热门', legacy: '旧记录' }[s.source] || s.source}</td><td>{(s.share * 100).toFixed(1)}%</td><td>{s.click_rate == null ? '—' : `${(s.click_rate * 100).toFixed(1)}%`}</td><td>{s.not_interested_rate == null ? '—' : `${(s.not_interested_rate * 100).toFixed(1)}%`}</td></tr>)}</tbody>
+                    </table>
+                  </div>
+                  <p className="mt-2 text-xs text-muted">占比按生成条目计算；点击率与不感兴趣率按实际曝光计算。没有曝光时显示 —。</p>
+                </>
+              ) : <p className="text-sm text-muted">还没有来源统计，浏览几批推荐后再来查看。</p>}
+            </div>
+          </div>
+        )}
       </Section>
 
       <Section title="推荐模型">
@@ -154,7 +200,7 @@ export function SettingsPage() {
       </Section>
 
       <Section title="过滤">
-        <Link to="/settings/filters" className="text-sm text-accent hover:underline">
+        <Link to="/settings/filters" viewTransition className="text-sm text-accent hover:underline">
           管理屏蔽关键词与 UP →
         </Link>
       </Section>

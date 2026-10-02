@@ -56,6 +56,7 @@ export function DebugPanel() {
           {row('正样本', data.model.summary?.positives ?? '-')}
           {row('Tag / UP 词表', `${data.model.summary?.num_tags ?? '-'} / ${data.model.summary?.num_authors ?? '-'}`)}
           {row('候选池 hot / rcmd', `${data.pool.hot} / ${data.pool.rcmd}`)}
+          {row('关注 / 旧作 / 相关', `${data.pool.follow} / ${data.pool.up_archive} / ${data.pool.related}`)}
           {row('有效候选（有已知 Tag）', data.valid_candidates)}
           {row(
             'served',

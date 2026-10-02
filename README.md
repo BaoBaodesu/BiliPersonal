@@ -12,6 +12,26 @@
 
 缺少环境、构建失败或端口不可用时，脚本显示错误并停止，不自动安装依赖或结束已有进程。首次安装前端依赖可在 `frontend` 目录执行 `npm ci`。下方保留手动启动及前端热更新的开发方式。
 
+## v0.3.1 推荐来源
+
+首页采用「关注新作 / 相关视频 / 常看 UP 旧作 / B 站推荐流 / 热门」多路召回。默认每页 12 条按 4 / 4 / 3 / 1 分配，热门仅补空位；个性化来源不足时先互相补位，再由仅兜底来源补齐（推荐流先于热门）。同一 UP 每页最多 2 条，相关来源的陌生 UP 每页最多 3 条、每人最多 1 条；降权内容每页最多 1 条并排在末尾。
+
+设置 → 推荐来源，可分别将热门和推荐流设为关闭 / 仅兜底 / 少量（每页 1 条）/ 标准（每页 3 条）。关闭会隐藏对应入口；「经典首页」恢复 v0.3 首页路径。修改从下一次换一批生效，已有批次保留原设置与模型。最近 7 天面板按新来源记录展示占比，点击和不感兴趣率以实际曝光为分母；无法归因来源的旧记录不计入面板。
+
+「关注」页按发布时间排列，不评分、不做曝光冷却、发布时间不限；首页的关注新作只取最近 30 天。单次完播只成为熟悉 UP，免陌生质量闸门，但不挖旧作；最近 1000 条观看历史中看过同一 UP 至少 3 个不同视频且各自达到 50%，或点赞 / 收藏过其视频，才成为常看 UP。
+
+已看和收藏分别计算。实际观看历史或有效的「看过了」反馈排除视频；仅收藏且未看过的视频仍可推荐，并作为兴趣和种子信号。关注新作 / 推荐流 / 热门在 24 小时内不重复，连续展示 2 次未点击后不再推荐；旧作 / 相关视频在 2 次未点击后冷却 30 天。视频特征 `favorite` 是公开收藏数，不能据此认定用户已收藏。
+
+「不感兴趣」可选择不喜欢 UP / 不喜欢题材 / 标题或封面党，分别施加 30 天 UP / 主标签降权；对陌生 UP 还暂停扩展 30 天。撤销反馈会撤销关联惩罚。调试开关「显示推荐评分」会显示来源理由、种子和 UP 观看统计。后台请求至少间隔 1 秒，遇风控退避并使用本地池；换一批最多补 12 条详情，不展示未补全内容。
+
+首次 v0.3 排序器准入改为：新来源积累两三天后，在混合候选池上完成五批盲评；用户确认结果后，停止服务执行：
+
+```powershell
+.venv\Scripts\python.exe modelctl.py approve-activate 候选版本名 --confirm
+```
+
+该命令仅用于首个长期锚点，跳过首次在线试用；后续自动晋升继续走 50% 试用与原有护栏。未完成五批盲评、模型不匹配、缺少确认或已有锚点都会拒绝准入。实现与验收记录见 [docs/v0.3.1_validation.md](docs/v0.3.1_validation.md)。
+
 ## v0.3 推荐闭环与模型管理
 
 实施约定见 [v0.3_PLAN.md](v0.3_PLAN.md)，验收记录见 [docs/v0.3_validation.md](docs/v0.3_validation.md)。SQLite 采用增量迁移，旧推荐流水保留；`historyVideo.json`、根目录旧权重和处理器不会被新训练覆盖。首次加载会把当前磁盘 v0.2 工件复制为不可变基线，`saved_model/active.json` 管理活动版本。
@@ -36,7 +56,7 @@
 
 ```powershell
 .venv\Scripts\python.exe modelctl.py blind-report
-# 用户查看报告并明确确认在线试用后，才执行：
+# 需要保留原有在线试用流程时，用户确认后执行：
 .venv\Scripts\python.exe modelctl.py approve-trial
 # 异常时提前停止并继续当前模型：
 .venv\Scripts\python.exe modelctl.py stop-trial
@@ -51,7 +71,7 @@ Quality 与排序策略实验默认关闭，分别使用 `modelctl.py train --qu
 验收命令（临时 SQLite、固定样本、假接口，不调用真实 B 站）：
 
 ```powershell
-.venv\Scripts\python.exe -W ignore -m unittest discover -s backend/tests -p test_v03.py -v
+.venv\Scripts\python.exe -W ignore -m unittest discover -s backend/tests -p "test*.py" -v
 cd frontend
 node tests/telemetry.cjs
 npm run build
@@ -185,6 +205,8 @@ npm run dev        # http://127.0.0.1:5173
   ↓ 精确屏蔽 UP（blocked_ups，按 mid / 完整名称）
   ↓ UP 主名称关键词（filter_rules.target_type = uploader）
   ↓ 标题关键词（filter_rules.target_type = title，同时匹配标签）
+  ↓ 标签规则（filter_rules.target_type = tag）
+  ↓ 分区规则（filter_rules.target_type = zone）
   ↓ 推荐模型 Rating / 排序
   ↓ served_videos 去重
 Feed
@@ -193,14 +215,14 @@ Feed
 规则模型实现在 `backend/services/filter_service.py`，SQL 与匹配逻辑集中于此，不散落到 route handler 或前端：
 
 - `hard_block` 命中任意一条即不进入最终 Feed，模型 Rating 不能覆盖
-- `downrank` 行为已在数据库预留，供后续手动调整
+- `downrank` 命中时保留视频，混合页最多展示 1 条并排在末尾
 - 关键词统一 `trim` + `casefold` 归一化，唯一索引 `(target_type, keyword_norm, match_mode)` 防重
 - 英文大小写不敏感，中文按包含关系匹配
 - 命中统计只在候选**真正参与 Feed 生成**时累加；同一视频命中同一规则只记 1 次，命中多条规则各自 +1
 
-**缓存即时失效**：任何规则增删改启停或 `blocked_up` 变更都会让 `app_state['filters:version']` 自增并清空 `feed_cache`，**不会**清理 `recommendation_history` / `served_videos` / `feedback` / `candidates`。
+**缓存即时过滤**：规则或 `blocked_up` 变更让 `app_state['filters:version']` 自增；保留 stream 的模型和来源归属，读取缓存页时重新应用当前硬过滤，不清理 `recommendation_history` / `served_videos` / `feedback` / `candidates`。降权顺序从新生成页面开始生效。
 
-设置页 → 过滤规则 提供三个 Tab：标题关键词 / UP 主关键词 / 精确屏蔽 UP，支持搜索、单条增删、启用禁用、批量导入（按 `|` 或换行分隔，返回输入/新增/重复/无效数量）。
+设置页 → 过滤规则 提供五个 Tab：标题关键词 / UP 主关键词 / 标签 / 分区 / 精确屏蔽 UP，支持搜索、单条增删、启用禁用、屏蔽 / 降权切换、批量导入（按 `|` 或换行分隔，返回输入/新增/重复/无效数量）。
 
 ---
 
@@ -240,6 +262,8 @@ DELETE /filters/ups/<id>
 # 用户与系统
 GET    /user/profile  /user/interests  /user/history  /user/favorites  /user/watch-later
 GET    /system/status  /system/debug
+GET    /system/sources           来源设置与最近 7 天来源统计
+PUT    /system/sources           修改热门 / 推荐流档位与经典首页开关
 POST   /system/retrain
 ```
 
@@ -319,6 +343,10 @@ POST   /system/retrain
 ---
 
 ## 已知限制
+
+v0.3.1 加载／刷新延迟的第一轮诊断见 [docs/v0.3.1_feed_performance_report.md](docs/v0.3.1_feed_performance_report.md)。默认不启用诊断；运行服务前设置环境变量 `BILIPERSONAL_FEED_PERF=1` 可记录第一层 Feed 阶段、请求和等待耗时，日志默认写入忽略目录 `.tmp/feed-performance/traces.jsonl`，响应头包含 `X-Feed-Trace-Id`。`BILIPERSONAL_FEED_PERF_DEEP=1` 才开启额外 SQL 等深度统计，本轮定位不需要开启。采样工具 `python -m backend.tools.feed_performance --real --count 2` 使用生产数据库副本，保持请求限速，不写生产 Feed 记录。
+
+性能优化的行为边界、50 次 HTTP 验收及测试结果见 [docs/v0.3.1_feed_optimization_report.md](docs/v0.3.1_feed_optimization_report.md)。普通新版 Feed 先用完整候选成页，不足时由后台补池，可稍后手动换一批；关注首屏与具体分区保留有限的新鲜度请求。
 
 - **Windows 上 `requirements.txt` 无法直接安装**，请使用 `requirements.win-test.txt`（原因见上）。
 - **Bilibili API 可能变化**（`-352` / `-101` / `412` 等）。热门榜接口在短时间连续请求时会触发 `-352` 风控，属瞬时限流，通常数十秒后自愈。遇到空结果请先确认接口状态，再怀疑算法。

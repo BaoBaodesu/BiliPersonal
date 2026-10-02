@@ -18,6 +18,11 @@ export function FeedToolbar({ first, onRefresh, refreshing, children }: Props) {
   if (status?.rate_limited || first?.notice === 'rate_limited') {
     notices.push({ icon: ShieldAlert, text: 'Bilibili 暂时限制了候选请求，正在使用缓存推荐', tone: 'text-danger' })
   }
+  if (first?.notice === 'following_stale') {
+    notices.push({ icon: AlertCircle, text: '最新动态暂未刷新成功，正在显示本地时间线' })
+  } else if (first?.notice === 'accumulating') {
+    notices.push({ icon: Loader2, text: '候选正在准备，可稍后换一批' })
+  }
   if (status?.training) {
     notices.push({
       icon: Loader2,
@@ -28,7 +33,7 @@ export function FeedToolbar({ first, onRefresh, refreshing, children }: Props) {
     })
   } else if (status?.model === 'error') {
     notices.push({ icon: AlertCircle, text: '模型暂时不可用，可在设置中查看状态或重试训练', tone: 'text-danger' })
-  } else if (first && !first.ranked && first.items.length > 0) {
+  } else if (first && !first.ranked && first.items.length > 0 && first.items.some((v) => v.source !== 'follow')) {
     notices.push({ icon: Loader2, text: '模型准备中，暂按热度排序' })
   }
 

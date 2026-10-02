@@ -9,11 +9,12 @@ import json
 import threading
 import time
 
-from backend.config import POOL_KEEP, POOL_MIN_REFRESH_INTERVAL, POOL_TTL
+from backend.config import POOL_KEEP, POOL_MIN_REFRESH_INTERVAL, POOL_TTL, SOURCE_TTL, SOURCE_KEEP
 from backend.services.bilibili_service import BiliError, LoginExpired, RateLimited, bili
 from backend.storage.database import connect, get_state, now, set_state
+from backend.services import feed_performance as perf
 
-SOURCES = ("hot", "rcmd")
+SOURCES = ("hot", "rcmd", "follow", "up_archive", "related")
 
 
 class CandidatePool:
@@ -25,24 +26,38 @@ class CandidatePool:
         return get_state(f"pool:{source}", {"last_refresh_at": 0, "created_at": 0, "cursor": 1, "no_more": False})
 
     def is_stale(self, source):
-        return time.time() - self.state(source)["last_refresh_at"] > POOL_TTL
+        return time.time() - self.state(source)["last_refresh_at"] > SOURCE_TTL.get(source, POOL_TTL)
 
+    @perf.measured("pool_read_ms", source_arg=1)
     def all(self, sources):
+        perf.add("pool_read_calls")
+        if not sources:
+            return []
         placeholders = ",".join("?" * len(sources))
         with connect() as conn:
             rows = conn.execute(
-                f"SELECT data, source, created_at FROM candidates WHERE source IN ({placeholders}) "
+                f"SELECT data, source, created_at, last_refresh_at FROM candidates WHERE source IN ({placeholders}) "
                 "ORDER BY created_at DESC",
                 tuple(sources),
             ).fetchall()
+        perf.add("pool_rows_read", len(rows))
         seen = set()
         videos = []
         for row in rows:
-            video = json.loads(row["data"])
+            if row["last_refresh_at"] < time.time() - SOURCE_KEEP.get(row["source"], POOL_KEEP):
+                continue
+            video = perf.decode_json(row["data"])
+            # 旧动态接口把 pub_ts 返回为字符串，读取时兼容，不迁移已存候选。
+            if row["source"] == "follow" and isinstance(video.get("pubdate"), str):
+                try:
+                    video["pubdate"] = float(video["pubdate"])
+                except ValueError:
+                    video["pubdate"] = 0
             if video["bvid"] in seen:
                 continue
             seen.add(video["bvid"])
             videos.append(video)
+        perf.observe_pool(videos)
         return videos
 
     def get(self, bvid):
@@ -56,35 +71,43 @@ class CandidatePool:
                 return conn.execute("SELECT COUNT(*) FROM candidates WHERE source = ?", (source,)).fetchone()[0]
             return conn.execute("SELECT COUNT(DISTINCT bvid) FROM candidates").fetchone()[0]
 
-    def expand(self, source, restart=False, manual=False):
+    @perf.measured("recall_ms", source_arg=1)
+    def expand(self, source, restart=False, manual=False, category="all", stop=None, details=None, seed_budget=None, head_only=False):
         """
         抓取一页新候选写入池中。返回新增条数；风控 / 其他任务正在抓取时返回 0。
         restart：从第一页重新开始（TTL 到期或手动刷新）。
         """
         lock = self._locks[source]
-        if not lock.acquire(blocking=False):
+        if not perf.try_lock(lock, "source_pool_lock_busy_count"):
             return 0
         try:
             if bili.rate_limited or not bili.has_cookie:
+                perf.add("backoff_skipped_count", int(bili.rate_limited))
                 return 0
             state = self.state(source)
             if manual and time.time() - state["last_refresh_at"] < POOL_MIN_REFRESH_INTERVAL:
                 # 手动刷新过于频繁时不重新从第一页开始，只继续向后翻页
                 restart = False
-            if restart or time.time() - state["last_refresh_at"] > POOL_TTL:
+            if restart or (source in ("hot", "rcmd") and self.is_stale(source)):
                 state = {**state, "cursor": 1, "no_more": False, "created_at": time.time()}
             try:
+                from backend.services.source_mixer import settings
                 if source == "hot":
                     if state["no_more"]:
                         return 0
-                    videos, no_more = bili.fetch_hot(state["cursor"])
+                    videos, no_more = bili.fetch_hot(state["cursor"], details=settings()["classic"] if details is None else details)
                     state["no_more"] = no_more
+                elif source == "rcmd":
+                    videos = bili.fetch_rcmd(state["cursor"], details=settings()["classic"] if details is None else details)
                 else:
-                    videos = bili.fetch_rcmd(state["cursor"])
+                    from backend.services.source_scheduler import scheduler
+                    videos = scheduler.fetch(source, state, category, stop, seed_budget=seed_budget, head_only=head_only)
             except LoginExpired:
                 raise
             except BiliError as e:
                 self.last_error[source] = {"time": time.time(), "code": e.code}
+                return 0
+            if stop and stop.is_set():
                 return 0
             state["cursor"] += 1
             state["last_refresh_at"] = time.time()
@@ -99,13 +122,54 @@ class CandidatePool:
         t = now()
         with connect() as conn:
             for video in videos:
+                # 仅诊断开启时查询写入前状态；不改变原来的 UPSERT 与事务。
+                if perf.current() and perf.current().deep:
+                    existing = conn.execute("SELECT data FROM candidates WHERE bvid=? AND source=?", (video["bvid"], source)).fetchone()
+                    perf.add("candidate_updated" if existing else "sync_candidates_added")
+                    if video.get("_detail_complete") and (not existing or not json.loads(existing[0]).get("_detail_complete")):
+                        perf.add("sync_detail_completed")
                 conn.execute(
                     "INSERT INTO candidates(bvid, source, data, created_at, last_refresh_at) VALUES(?, ?, ?, ?, ?) "
-                    "ON CONFLICT(bvid, source) DO UPDATE SET data = excluded.data, "
+                    "ON CONFLICT(bvid, source) DO UPDATE SET data = CASE WHEN "
+                    "json_extract(excluded.data, '$._detail_complete')=0 AND json_extract(candidates.data, '$._detail_complete')=1 "
+                    "THEN candidates.data ELSE excluded.data END, "
                     "last_refresh_at = excluded.last_refresh_at",
                     (video["bvid"], source, json.dumps(video, ensure_ascii=False), t, t),
                 )
-            conn.execute("DELETE FROM candidates WHERE last_refresh_at < ?", (t - POOL_KEEP,))
+            conn.execute("DELETE FROM candidates WHERE source=? AND last_refresh_at < ?", (source, t - SOURCE_KEEP.get(source, POOL_KEEP)))
+
+    @perf.measured("complete_ms")
+    def complete(self, sources, budget=12, stop=None, exclude=(), candidates=None):
+        """前置过滤后有限补详情；未补全的条目不得展示。"""
+        from backend.services.filter_service import filters
+        candidates, _ = filters.filter_candidates(candidates if candidates is not None else [v for source in sources for v in self.all((source,))], record=False)
+        queues = {source: [v for v in candidates if v.get("source") == source and not v.get("_detail_complete") and v["bvid"] not in exclude] for source in sources}
+        completed = 0
+        while completed < budget and any(queues.values()):
+            for source in sources:
+                if completed >= budget or bili.rate_limited or (stop and stop.is_set()):
+                    return completed
+                if not queues[source]:
+                    continue
+                video = queues[source].pop(0)
+                try:
+                    with perf.span("detail_complete_ms", source):
+                        perf.add("detail_attempted")
+                        detail = {**video, **bili.detail(video["bvid"]), "source": source, "_detail_complete": True}
+                        if not stop or not stop.is_set():
+                            self._save(source, [detail])
+                except (RateLimited, LoginExpired):
+                    perf.add("detail_failed")
+                    return completed
+                except BiliError as error:
+                    perf.add("detail_failed")
+                    self.last_error[source] = {"time": time.time(), "code": error.code}
+                    completed += 1
+                    continue
+                if stop and stop.is_set():
+                    return completed
+                completed += 1
+        return completed
 
     def clear(self):
         with connect() as conn:

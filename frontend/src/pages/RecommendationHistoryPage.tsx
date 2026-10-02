@@ -7,7 +7,7 @@ import { LoadMoreTrigger } from '../components/LoadMoreTrigger'
 import { EmptyState } from '../components/EmptyState'
 import type { FeedType } from '../types'
 
-const TYPE_LABEL: Record<FeedType, string> = { for_you: '首页', hot: '热门', explore: '探索' }
+const TYPE_LABEL: Record<FeedType, string> = { for_you: '首页', hot: '热门', explore: '探索', following: '关注' }
 const FEEDBACK_LABEL: Record<string, string> = {
   not_interested: '不感兴趣',
   block_up: '屏蔽 UP',

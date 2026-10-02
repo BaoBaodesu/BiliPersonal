@@ -8,6 +8,7 @@ import threading
 import uuid
 
 from backend.config import MODEL_DIR, HISTORY_PATH
+from backend.services import feed_performance as perf
 
 
 def atomic_json(path, value):
@@ -87,6 +88,7 @@ class ModelRegistry:
                 raise ValueError("模型工件校验失败")
         return metadata
 
+    @perf.measured("model_load_ms")
     def load(self, version):
         if version == "fallback-v03":
             return None

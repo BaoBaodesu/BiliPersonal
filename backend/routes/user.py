@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 import requests
 from flask import Blueprint, Response, jsonify, request
 
-from backend.recommender.recommender import read_history
+from backend.services.affinity import affinity, progress_ratio
 from backend.routes.common import api, error, login_required
 from backend.services.bilibili_service import UA, bili
 from backend.services.feedback_service import feedback
@@ -24,8 +24,8 @@ def profile():
 @api
 @login_required
 def interests():
-    """兴趣画像：基于训练用的历史 / 收藏数据（historyVideo.json）"""
-    history = read_history()
+    """兴趣画像读取累计事件，收藏与观看证据分别保留。"""
+    history = affinity.history()
     tag_weight = Counter()
     recent_tags = Counter()
     ups = Counter()
@@ -37,8 +37,7 @@ def interests():
     for h in history:
         # 权重与原版兴趣分数一致：max((点赞+收藏)/2, 进度比例)，最低 0.2
         duration = h.get("duration") or 0
-        progress_ratio = (h.get("progress") or 0) / duration if duration > 0 else 0
-        weight = max((float(h.get("isliked") or 0) + float(h.get("isfaved") or 0)) / 2, min(progress_ratio, 1), 0.2)
+        weight = max((float(h.get("isliked") or 0) + float(h.get("isfaved") or 0)) / 2, progress_ratio(h), 0.2)
         for tag in h.get("tag") or []:
             tag_weight[tag] += weight
             if h["bvid"] in recent_ids:

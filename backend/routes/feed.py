@@ -4,6 +4,7 @@ from backend.routes.common import api, error, login_required
 from backend.services.bilibili_service import bili
 from backend.services.filter_service import filters
 from backend.services.recommendation_service import FeedError, recommendation
+from backend.services import feed_performance as perf
 
 bp = Blueprint("feed", __name__, url_prefix="/api/v1")
 
@@ -24,7 +25,7 @@ def exposures():
 @login_required
 def get_feed():
     try:
-        return jsonify(recommendation.get_feed(
+        return perf.json_response(recommendation.get_feed(
             request.args.get("type", "for_you"),
             request.args.get("category", "all"),
             request.args.get("cursor"),
@@ -41,7 +42,7 @@ def get_feed():
 def refresh_feed():
     body = request.get_json(silent=True) or {}
     try:
-        return jsonify(recommendation.refresh(
+        return perf.json_response(recommendation.refresh(
             body.get("type", "for_you"), body.get("category", "all"), body.get("limit", 12), body.get("view_id")
         ))
     except FeedError as e:

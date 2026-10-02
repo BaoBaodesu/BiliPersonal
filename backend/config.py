@@ -37,3 +37,20 @@ SERVED_WINDOW = 24 * 3600
 POOL_MIN_REFRESH_INTERVAL = 5 * 60
 # 触发 -352 后的退避时间（秒）
 RATE_LIMIT_BACKOFF = 90
+
+# v0.3.1：多路召回的窗口、配额和后台节奏
+SOURCE_WEIGHTS = {"follow": 4, "related": 4, "up_archive": 3}
+SOURCE_DEFAULTS = {"hot": "fallback", "rcmd": "small", "classic": False}
+SOURCE_LEVELS = ("off", "fallback", "small", "standard")
+FOLLOW_WINDOW = 30 * 86400
+SOURCE_TTL = {"follow": 1800, "up_archive": 3600, "related": 1800}
+SOURCE_KEEP = {"follow": 30 * 86400, "up_archive": 30 * 86400, "related": 30 * 86400}
+SOURCE_REQUEST_INTERVAL = 1
+FOLLOWINGS_INTERVAL = 86400
+ARCHIVE_UPS_PER_HOUR = 2
+RELATED_SEEDS_PER_REFRESH = 3
+SOURCE_DETAIL_BUFFER = 24
+SOURCE_SYNC_DETAILS = 12
+SOURCE_UP_LIMIT = 2
+SOURCE_STRANGER_LIMIT = 3
+SOURCE_PENALTY_DAYS = 30

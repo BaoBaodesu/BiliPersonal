@@ -20,6 +20,11 @@
   --overlay: rgba(0, 0, 0, 0.8);
   --skeleton: #e8e8e8;
   --shadow: 0 4px 32px rgba(0, 0, 0, 0.12);
+  --motion-sidebar: 220ms;
+  --motion-fade: 140ms;
+  --motion-page: 180ms;
+  --ease-ui: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-enter: cubic-bezier(0.22, 1, 0.36, 1);
   color-scheme: light;
 }
 
@@ -137,6 +142,87 @@ button:disabled {
   animation: fade-in 0.25s ease-out both;
 }
 
+/* 侧栏与内容同步移动，导航使用固定宽度避免动画中换行。 */
+.sidebar-desktop {
+  transition: width var(--motion-sidebar) var(--ease-ui);
+}
+.app-main {
+  transition: padding-left var(--motion-sidebar) var(--ease-ui);
+}
+.sidebar-nav {
+  visibility: hidden;
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity var(--motion-fade) var(--ease-ui),
+    transform var(--motion-sidebar) var(--ease-enter),
+    visibility 0s var(--motion-fade);
+}
+.sidebar-nav.is-visible {
+  visibility: visible;
+  opacity: 1;
+  transform: none;
+  transition-delay: 0s;
+}
+.sidebar-link {
+  transition: background-color var(--motion-fade) var(--ease-ui);
+}
+
+/* 抽屉保持挂载，让关闭时也能平滑退出；隐藏时由 inert 禁用交互。 */
+.sidebar-mobile {
+  visibility: hidden;
+  transition: visibility 0s var(--motion-sidebar);
+}
+.sidebar-mobile.is-visible {
+  visibility: visible;
+  transition-delay: 0s;
+}
+.sidebar-backdrop {
+  opacity: 0;
+  transition: opacity var(--motion-sidebar) var(--ease-ui);
+}
+.sidebar-drawer {
+  transform: translateX(-100%);
+  transition: transform var(--motion-sidebar) var(--ease-ui);
+}
+.sidebar-mobile.is-visible .sidebar-backdrop {
+  opacity: 1;
+}
+.sidebar-mobile.is-visible .sidebar-drawer {
+  transform: none;
+}
+
+/* 仅页面内容参与路由过渡，顶栏和侧栏保持稳定。 */
+.page-content {
+  view-transition-name: page-content;
+}
+::view-transition-group(root),
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+}
+::view-transition-group(page-content) {
+  animation-duration: var(--motion-page);
+  animation-timing-function: var(--ease-ui);
+}
+::view-transition-old(page-content) {
+  animation: page-out 100ms ease-in both;
+}
+::view-transition-new(page-content) {
+  animation: fade-in var(--motion-page) var(--ease-enter) both;
+}
+::view-transition-image-pair(page-content) {
+  isolation: isolate;
+}
+::view-transition-old(page-content),
+::view-transition-new(page-content) {
+  mix-blend-mode: normal;
+}
+@keyframes page-out {
+  to {
+    opacity: 0;
+  }
+}
+
 @keyframes progress-slide {
   0% {
     transform: translateX(-100%);
@@ -155,6 +241,23 @@ button:disabled {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .sidebar-desktop,
+  .app-main,
+  .sidebar-nav,
+  .sidebar-link,
+  .sidebar-mobile,
+  .sidebar-backdrop,
+  .sidebar-drawer {
+    transition: none;
+  }
+  .page-content {
+    view-transition-name: none;
+  }
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none;
+  }
   .skeleton,
   .fade-in,
   .progress-bar::after {

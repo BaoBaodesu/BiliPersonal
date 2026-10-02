@@ -23,6 +23,8 @@ def qrcode_status():
         return error("bad_request", "Missing qrcode_key", 400)
     status = bili.qrcode_poll(qrcode_key)
     if status == "success":
+        from backend.services.source_scheduler import scheduler
+        scheduler.stop()
         # 新登录：清空上一个账号的候选池与 Feed 缓存，后台准备模型与首页推荐
         training.reset()
         pool.clear()
@@ -47,6 +49,8 @@ def status():
 @bp.post("/logout")
 @api
 def logout():
+    from backend.services.source_scheduler import scheduler
+    scheduler.stop()
     bili.clear_cookie()
     training.reset()
     pool.clear()

@@ -31,8 +31,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 本地工作约定
 
 - v0.2（React Web + /api/v1 + Feed 生命周期 + 反馈基础设施）：不改推荐算法与超参（threshold/alpha/beta/gamma/embedding_dim/num_epochs），`backend/recommender/model.py` 仅调整了导入与路径。算法改造留到 v0.3。
-- v0.2.1（统一过滤规则层）：`filter_rules` 是屏蔽规则的唯一数据源，`blocked_ups` 继续负责按 mid/name 精确屏蔽，`blocked_keywords` 仅作历史保留、**已无任何代码依赖**。过滤顺序固定为 精确 MID → UP 关键词 → 标题关键词，实现在 `backend/services/filter_service.py`，不要在 route handler / FeedPage.tsx / recommender 里另写一套匹配逻辑。
-- 规则变更（增删改启停、blocked_up 增删）必须调用 `filters.invalidate_cache()` 或经由其 CRUD 方法，它会 `filters:version +1` 并清空 `feed_cache`；**绝不要**顺手清 `recommendation_history` / `served_videos` / `feedback` / `candidates`。命中统计只在候选真正参与 Feed 生成时累加（`_rank` 传 `record_hits=True`），预取预判不计数。
+- v0.3.1（统一过滤规则层）：`filter_rules` 是屏蔽规则的唯一数据源，`blocked_ups` 继续负责按 mid/name 精确屏蔽，`blocked_keywords` 仅作历史保留、**已无任何代码依赖**。过滤顺序固定为 精确 MID → UP 关键词 → 标题关键词 → 标签 → 分区，实现在 `backend/services/filter_service.py`；降权只打标记，混合器限制每页 1 条并后置。不要在 route handler / FeedPage.tsx / recommender 里另写一套匹配逻辑。
+- 规则变更（增删改启停、blocked_up 增删）必须调用 `filters.invalidate_cache()` 或经由其 CRUD 方法，它会 `filters:version +1`；保留不可变 stream 的模型与来源设置，读取缓存页时应用最新硬过滤。**绝不要**顺手清 `recommendation_history` / `served_videos` / `feedback` / `candidates`。命中统计只在候选真正参与 Feed 生成时累加（`record_hits=True`），预取预判不计数。
+- 来源设置位于 `app_state['sources:settings']`，生成 stream 时冻结设置；切换档位或经典首页不改已有批次。`affinity.py` 分别计算观看与收藏集合：收藏不能推导已看，公开 `favorite` 收藏数不能推导用户收藏。单次完播只进入熟悉层，旧作仅挖常看 UP。`training_data.label` 和 `PROTOCOL` 不随来源改造改变。
 - `backend/data/app.backup-*.db` 为迁移前时间戳备份（`backend/data/` 已被 gitignore，不会提交）。
 - Bilibili API 可能已变化（-352/-101/412 等），先确认接口本身再怀疑算法。
 - 日志/输出中绝不能出现 Cookie、SESSDATA、bili_jct 等凭证；`user_data/cookie.txt` 已在 `.gitignore`，提交前用 `git status` 确认。

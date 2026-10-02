@@ -6,12 +6,14 @@ import { api } from '../api/client'
 import type { Video } from '../types'
 import { videoUrl } from '../hooks/format'
 import { useDialogFocus } from '../hooks/useDialogFocus'
+import { useUi } from '../stores/ui'
 
-const SOURCE_LABEL: Record<string, string> = { hot: '热门列表', rcmd: 'B 站推荐流', search: '搜索' }
+const SOURCE_LABEL: Record<string, string> = { hot: '热门列表', rcmd: 'B 站推荐流', search: '搜索', follow: '关注新作', up_archive: '常看 UP 旧作', related: '相关视频' }
 
 // “为什么推荐给我”：基于标签交集与相同 UP 的简单解释
 export function ExplainDialog({ video, onClose, returnFocus }: { video: Video; onClose: () => void; returnFocus?: RefObject<HTMLElement | null> }) {
   const dialog = useRef<HTMLDivElement>(null)
+  const showRating = useUi((s) => s.showRating)
   useDialogFocus(dialog, true, onClose, returnFocus)
   const { data, isLoading, isError } = useQuery({
     queryKey: ['explain', video.bvid],
@@ -71,6 +73,13 @@ export function ExplainDialog({ video, onClose, returnFocus }: { video: Video; o
               候选来源：{SOURCE_LABEL[data.source] || data.source || '未知'}
               {data.rcmd_reason && ` · ${data.rcmd_reason}`}
             </div>
+            {showRating && (
+              <div className="space-y-2 border-t border-line pt-3 text-xs text-muted">
+                <p>{video.source_reason || data.source_reason}</p>
+                {(video.seed_bvid || data.seed_video?.bvid) && <p>种子视频：<a className="text-accent hover:underline" href={videoUrl(video.seed_bvid || data.seed_video!.bvid)} target="_blank" rel="noreferrer">{video.seed_title || data.seed_video?.title || video.seed_bvid}</a></p>}
+                {data.up_affinity && <p>UP：{data.up_affinity.level === 'regular' ? '常看' : data.up_affinity.level === 'familiar' ? '熟悉' : '陌生'} · 看过至少一半 {data.up_affinity.watched_count} 个视频{data.up_affinity.following ? ' · 已关注' : ''}</p>}
+              </div>
+            )}
           </div>
         )}
       </div>

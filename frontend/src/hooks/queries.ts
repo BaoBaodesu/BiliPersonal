@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query'
 import { api } from '../api/client'
 import { useToast, useUi } from '../stores/ui'
-import type { FeedbackAction, FeedPage, FeedType, Video } from '../types'
+import type { FeedbackAction, FeedbackReason, FeedPage, FeedType, Video } from '../types'
 
 export const keys = {
   auth: ['auth'] as const,
@@ -11,6 +11,7 @@ export const keys = {
   categories: ['feed', 'categories'] as const,
   filters: ['filters'] as const,
   interests: ['interests'] as const,
+  sources: ['system', 'sources'] as const,
 }
 
 export function useAuth() {
@@ -24,6 +25,11 @@ export function useSystemStatus() {
     // 训练中每 2 秒轮询一次，空闲时 30 秒一次
     refetchInterval: (q) => (q.state.data?.training || q.state.data?.model !== 'ready' ? 2000 : 30000),
   })
+}
+
+export function useSources() {
+  const { data: auth } = useAuth()
+  return useQuery({ queryKey: keys.sources, queryFn: api.system.sources, enabled: auth?.logged_in === true, staleTime: 30_000 })
 }
 
 export function useFeed(type: FeedType, category: string, viewId?: string) {
@@ -62,7 +68,7 @@ export function useAutoUpgradeFeed(type: FeedType, category: string, ranked: boo
   const refresh = useRefreshFeed(type, category, viewId)
   const ready = status?.model === 'ready'
   useEffect(() => {
-    if (ready && ranked === false && !refresh.isPending) refresh.mutate()
+    if (type !== 'following' && ready && ranked === false && !refresh.isPending) refresh.mutate()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, ranked])
 }
@@ -79,8 +85,8 @@ export function useFeedback() {
   const qc = useQueryClient()
   const toast = useToast((s) => s.show)
   return useMutation({
-    mutationFn: ({ video, action }: { video: Video; action: FeedbackAction }) =>
-      api.feedback.send(video.bvid, action, video),
+    mutationFn: ({ video, action, reason }: { video: Video; action: FeedbackAction; reason?: FeedbackReason }) =>
+      api.feedback.send(video.bvid, action, video, crypto.randomUUID(), reason),
     onSuccess: (_, { video, action }) => {
       if (action === 'not_interested' || action === 'watched') {
         removeFromFeeds(qc, (v) => v.bvid === video.bvid)

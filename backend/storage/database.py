@@ -11,11 +11,12 @@ from contextlib import contextmanager
 
 from backend.config import DATA_DIR, DB_PATH
 from backend.storage.migrations import SCHEMA
+from backend.services import feed_performance as perf
 
 
 @contextmanager
 def connect():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = perf.sql_connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     try:
@@ -31,6 +32,8 @@ def init_db():
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
         from backend.storage.migrate_v03 import migrate
+        migrate(conn)
+        from backend.storage.migrate_v031 import migrate
         migrate(conn)
 
 

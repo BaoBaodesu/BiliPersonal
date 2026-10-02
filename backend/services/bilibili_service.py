@@ -17,11 +17,11 @@ from io import BytesIO
 
 import qrcode
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
-from backend.config import COOKIE_PATH, HISTORY_PATH, RATE_LIMIT_BACKOFF
+from backend.config import COOKIE_PATH, HISTORY_PATH, RATE_LIMIT_BACKOFF, SOURCE_REQUEST_INTERVAL
 from backend.services.zones import zone_of
+from backend.services import feed_performance as perf
+from backend.services import request_coordination as requests_scope
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -55,11 +55,11 @@ class LoginExpired(BiliError):
     pass
 
 
-def _make_session():
+def _make_session(gate):
     session = requests.Session()
-    retry = Retry(total=2, connect=2, read=2, backoff_factor=0.5,
+    retry = requests_scope.ManagedRetry(gate=gate, total=2, connect=2, read=2, backoff_factor=0.5,
                   status_forcelist=(500, 502, 504), raise_on_status=False)
-    adapter = HTTPAdapter(max_retries=retry)
+    adapter = requests_scope.ManagedAdapter(gate, max_retries=retry)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
@@ -68,14 +68,18 @@ def _make_session():
 class BilibiliService:
     def __init__(self):
         self._cookie = ""
-        self._session = _make_session()
         self._lock = threading.Lock()
+        self._slots = threading.Condition(self._lock)
+        self._waiting = []
+        self._front_streak = 0
+        self._session = _make_session(self._before_send)
         self._last_request_at = 0.0
         self._wbi_key = None
         self._wbi_key_at = 0.0
         self._nav_cache = None
         self._nav_cache_at = 0.0
         self._detail_cache = OrderedDict()
+        self._archive_fallback_until = {}
 
         # 调试信息
         self.rate_limit_count = 0
@@ -105,6 +109,8 @@ class BilibiliService:
         self._cookie = ""
         self._nav_cache = None
         self._detail_cache.clear()
+        self._archive_fallback_until.clear()
+        self.wake_requests()
 
     @property
     def has_cookie(self):
@@ -122,24 +128,78 @@ class BilibiliService:
     def _record_error(self, url, code, message):
         # 只记录接口路径与错误码，不记录参数（参数中可能包含签名）
         path = urllib.parse.urlparse(url).path
+        if perf.current() and perf.current().api and perf.current().api[-1]["path"] == path:
+            perf.current().api[-1]["error_code"] = code
         self.recent_errors.appendleft(
             {"time": time.time(), "path": path, "code": code, "message": str(message)[:120]}
         )
 
+    def _before_send(self, url=None, delay=0):
+        """初发、重试和重定向共用发送准入；超预算不产生网络请求。"""
+        value = requests_scope.current()
+        ticket = {"scope": value, "eligible": time.perf_counter() + delay, "identity": object()}
+        with perf.span("request_queue_wait_ms"):
+            busy = self._lock.locked()
+            with perf.span("rate_limiter_lock_wait_ms"):
+                self._slots.acquire()
+            if busy and perf.current():
+                perf.current().info["waited_rate_limiter"] = True
+            self._waiting.append(ticket)
+            self._slots.notify_all()
+            try:
+                while True:
+                    requests_scope.check(value, self.rate_limited)
+                    if value.get("candidate") and not self.has_cookie:
+                        raise requests_scope.BudgetEnded("logged_out")
+                    ready = []
+                    for waiting in self._waiting:
+                        try:
+                            requests_scope.check(waiting["scope"], self.rate_limited)
+                        except requests_scope.BudgetEnded:
+                            continue
+                        if waiting["eligible"] <= time.perf_counter():
+                            ready.append(waiting)
+                    front = next((v for v in ready if not v["scope"].get("background")), None)
+                    back = next((v for v in ready if v["scope"].get("background")), None)
+                    selected = back if back is not None and self._front_streak >= 3 else front if front is not None else back
+                    wait = max(SOURCE_REQUEST_INTERVAL - (time.perf_counter() - self._last_request_at), ticket["eligible"] - time.perf_counter())
+                    if selected is ticket and wait <= 0:
+                        requests_scope.consume(value)
+                        self._last_request_at = time.perf_counter()
+                        self._front_streak = self._front_streak + 1 if not value.get("background") and back is not None else 0
+                        break
+                    if perf.current():
+                        perf.current().info["waited_rate_limiter"] = True
+                    with perf.span("rate_limiter_sleep_ms"):
+                        # wait 释放队列锁；新来的前台可争取下一个尚未合法发送的槽。
+                        self._slots.wait(timeout=min(max(wait, .001), .1))
+            finally:
+                self._waiting.remove(ticket)
+                self._slots.notify_all()
+                self._slots.release()
+        perf.add("http_attempts")
+        if "/view/detail" in value.get("url", url or ""):
+            perf.add("detail_http_attempts")
+
+    def wake_requests(self):
+        with self._slots:
+            self._slots.notify_all()
+
     def get(self, url, params=None, wbi=False, timeout=10):
+        with requests_scope.managed(url):
+            return self._get(url, params, wbi, timeout)
+
+    def _get(self, url, params=None, wbi=False, timeout=10):
         """
         GET 并返回 data 字段；业务错误抛出 BiliError / RateLimited / LoginExpired。
-        简单节流：两次请求至少间隔 0.12 秒，降低触发风控的概率。
+        两次请求至少间隔 1 秒；签名的 nav 请求同样经过节流。
         """
-        with self._lock:
-            wait = 0.12 - (time.time() - self._last_request_at)
-            if wait > 0:
-                time.sleep(wait)
-            self._last_request_at = time.time()
         if wbi:
-            params = self._wbi_sign(params or {})
+            with perf.span("signing_ms"):
+                params = self._wbi_sign(params or {})
         try:
-            response = self._session.get(url, headers=self._headers(), params=params, timeout=timeout)
+            requests_scope.check(requests_scope.current(), self.rate_limited)
+            response = self._http_get(url, params, timeout)
         except requests.exceptions.RequestException as e:
             self._record_error(url, "network", type(e).__name__)
             raise BiliError("network", type(e).__name__)
@@ -164,9 +224,33 @@ class BilibiliService:
             raise LoginExpired(code, message)
         raise BiliError(code, message)
 
+    def _http_get(self, url, params, timeout):
+        """记录业务 HTTP 调用；实际初发/重试/重定向由发送准入统计。"""
+        if perf.current() is None:
+            return self._session.get(url, headers=self._headers(), params=params, timeout=timeout)
+        perf.add("bilibili_api_calls")
+        if urllib.parse.urlparse(url).path == "/x/web-interface/view/detail":
+            perf.add("detail_requests")
+        with perf.span("bilibili_http_ms"):
+            entry = {"path": urllib.parse.urlparse(url).path, "source": perf.current().source,
+                     "retries": None, "attempts": None}
+            perf.current().api.append(entry)
+            try:
+                response = self._session.get(url, headers=self._headers(), params=params, timeout=timeout)
+                entry["http_status"] = response.status_code
+                if getattr(getattr(response, "raw", None), "retries", None) is not None:
+                    entry["retries"] = len(response.raw.retries.history)
+                    entry["attempts"] = entry["retries"] + 1
+                    perf.add("http_retries", entry["retries"])
+                return response
+            except requests.exceptions.RequestException as error:
+                entry["error_type"] = type(error).__name__
+                raise
+
     def _on_rate_limited(self, url, code):
         self.rate_limit_count += 1
         self.rate_limited_until = time.time() + RATE_LIMIT_BACKOFF
+        self.wake_requests()
         self._record_error(url, code, "rate limited")
         print(f"Bilibili 风控 code={code}，{RATE_LIMIT_BACKOFF} 秒内暂停候选请求")
         raise RateLimited(code, "rate limited")
@@ -273,7 +357,9 @@ class BilibiliService:
     # ---------------- 视频详情 ----------------
 
     def detail(self, bvid):
+        perf.add("detail_calls")
         if bvid in self._detail_cache:
+            perf.add("detail_cache_hits")
             self._detail_cache.move_to_end(bvid)
             return self._detail_cache[bvid]
         data = self.get("https://api.bilibili.com/x/web-interface/view/detail", {"bvid": bvid})
@@ -304,27 +390,93 @@ class BilibiliService:
 
     # ---------------- 候选池 ----------------
 
-    def fetch_hot(self, pn, ps=20):
+    def fetch_hot(self, pn, ps=20, details=True):
         """
         热门候选：/x/web-interface/popular 分页（原版每周必看接口频繁 -352，这里改用热门列表）。
         返回 (videos, no_more)。视频结构与原版 hotVideo.json 一致，额外带 mid/tname/pubdate 等展示字段。
         """
         data = self.get("https://api.bilibili.com/x/web-interface/popular", {"pn": pn, "ps": ps})
-        items = [(item["bvid"], (item.get("rcmd_reason") or {}).get("content", "")) for item in data.get("list") or []]
-        return self._candidates_from_details(items, "hot"), bool(data.get("no_more"))
+        return self._listed_candidates(data.get("list") or [], "hot", details), bool(data.get("no_more"))
 
-    def fetch_rcmd(self, fresh_idx, ps=12):
+    def fetch_rcmd(self, fresh_idx, ps=12, details=True):
         """
         兴趣探索候选：首页推荐流（WBI 签名）。
         """
         params = {"fresh_type": 4, "ps": ps, "fresh_idx": fresh_idx, "fresh_idx_1h": fresh_idx, "brush": fresh_idx}
         data = self.get("https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd", params, wbi=True)
         items = [
-            (item["bvid"], (item.get("rcmd_reason") or {}).get("content", ""))
+            item
             for item in data.get("item") or []
             if item.get("goto") == "av" and item.get("bvid")
         ]
-        return self._candidates_from_details(items, "rcmd")
+        return self._listed_candidates(items, "rcmd", details)
+
+    def _listed_candidates(self, items, source, details=False):
+        from backend.services.filter_service import filters
+        videos = []
+        for item in items:
+            if not item.get("bvid"):
+                continue
+            owner = item.get("owner") or {}
+            stat = item.get("stat") or {}
+            videos.append({"bvid": item["bvid"], "title": item.get("title", ""), "pic": https(item.get("pic", "")),
+                           "mid": owner.get("mid") or item.get("mid"), "author": owner.get("name") or item.get("author", ""),
+                           "duration": parse_duration(item.get("duration") or item.get("length") or 0),
+                           "pubdate": item.get("pubdate") or item.get("created") or 0,
+                           "view": stat.get("view", item.get("play", 0)), "source": source,
+                           "rcmd_reason": (item.get("rcmd_reason") or {}).get("content", ""), "_detail_complete": False})
+        videos, _ = filters.filter_candidates(videos, record=False)
+        return self._candidates_from_details([(v["bvid"], v["rcmd_reason"]) for v in videos], source) if details else videos
+
+    def followings(self, pn=1, ps=50):
+        data = self.get("https://api.bilibili.com/x/relation/followings", {"vmid": self.nav()["mid"], "pn": pn, "ps": ps})
+        return {"items": [{"mid": v["mid"], "name": v.get("uname", "")} for v in data.get("list") or []],
+                "has_more": pn * ps < data.get("total", 0)}
+
+    def follow_feed(self, offset=""):
+        data = self.get("https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/all", {"type": "video", "offset": offset})
+        videos = []
+        for item in data.get("items") or []:
+            if item.get("type") != "DYNAMIC_TYPE_AV":
+                continue
+            modules = item.get("modules") or {}
+            archive = ((modules.get("module_dynamic") or {}).get("major") or {}).get("archive")
+            author = modules.get("module_author") or {}
+            if archive and archive.get("bvid"):
+                videos.append({"bvid": archive["bvid"], "title": archive.get("title", ""), "pic": archive.get("cover", ""),
+                               "author": author.get("name", ""), "mid": author.get("mid"), "pubdate": int(author.get("pub_ts") or 0),
+                               "duration": archive.get("duration_text", "")})
+        return {"items": self._listed_candidates(videos, "follow"), "offset": data.get("offset", ""), "has_more": bool(data.get("has_more"))}
+
+    def up_archives(self, mid, pn=1, order="click", ps=20):
+        if self.rate_limited:
+            raise RateLimited(-352, "rate limited")
+        if self._archive_fallback_until.get(str(mid), 0) > time.time():
+            data = self.get("https://api.bilibili.com/x/series/recArchivesByKeywords", {"mid": mid, "pn": pn, "ps": ps, "keywords": ""})
+            from backend.services.affinity import affinity
+            # 降级接口只有 upMid，没有 owner/name；补回已知身份才能前置过滤。
+            author = affinity.snapshot()["ups"].get(str(mid), {}).get("name", "")
+            items = [{**v, "mid": mid, "author": author} for v in data.get("archives") or []]
+            if order == "click":
+                items.sort(key=lambda v: v.get("stat", {}).get("view", 0), reverse=True)
+            else:
+                items.sort(key=lambda v: v.get("pubdate", 0), reverse=True)
+            return {"items": self._listed_candidates(items, "up_archive"), "has_more": pn * ps < (data.get("page") or {}).get("total", 0), "fallback": True}
+        try:
+            data = self.get("https://api.bilibili.com/x/space/wbi/arc/search", {"mid": mid, "pn": pn, "ps": ps, "order": order}, wbi=True)
+        except RateLimited as error:
+            if error.code == -352:
+                # 先遵守退避，再在下一轮走降级链，避免风控期间追加请求。
+                self._archive_fallback_until[str(mid)] = time.time() + 3600
+            raise
+        return {"items": self._listed_candidates((data.get("list") or {}).get("vlist") or [], "up_archive"),
+                "has_more": pn * ps < (data.get("page") or {}).get("count", 0), "fallback": False}
+
+    def related(self, bvid):
+        videos = self._listed_candidates(self.get("https://api.bilibili.com/x/web-interface/archive/related", {"bvid": bvid}) or [], "related")
+        for video in videos:
+            video["seed_bvid"] = bvid
+        return videos
 
     def _candidates_from_details(self, items, source):
         """
@@ -343,6 +495,7 @@ class BilibiliService:
                 continue
             video["source"] = source
             video["rcmd_reason"] = reason
+            video["_detail_complete"] = True
             videos.append(video)
         return videos
 

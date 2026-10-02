@@ -14,7 +14,7 @@ interface Props {
   menu?: boolean
 }
 
-const SOURCE_LABEL: Record<string, string> = { hot: '热门', rcmd: '推荐流' }
+const SOURCE_LABEL: Record<string, string> = { hot: '热门', rcmd: '推荐流', follow: '关注新作', up_archive: '常看旧作', related: '相关视频' }
 
 export function VideoCard({ video, inFeed = true, meta, menu = true }: Props) {
   const exposure = useExposure(video, inFeed)
@@ -95,6 +95,7 @@ export function VideoCard({ video, inFeed = true, meta, menu = true }: Props) {
               <span>#{video.rank ?? '-'}</span>
               <span>RT {video.rating != null ? video.rating.toFixed(4) : '未评分'}</span>
               <span>{SOURCE_LABEL[video.source || ''] || video.source}</span>
+              {video.source_reason && <span>{video.source_reason}</span>}
               {!!video.matched_tags?.length && <span className="truncate">[{video.matched_tags.join(', ')}]</span>}
             </div>
           )}

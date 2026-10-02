@@ -7,10 +7,11 @@ import { ModelStatus } from './ModelStatus'
 import { UserAvatar } from './UserAvatar'
 import { Logo } from './Logo'
 
-export const FEED_PATHS: Record<string, 'for_you' | 'hot' | 'explore'> = {
+export const FEED_PATHS: Record<string, 'for_you' | 'hot' | 'explore' | 'following'> = {
   '/': 'for_you',
   '/trending': 'hot',
   '/explore': 'explore',
+  '/following': 'following',
 }
 
 export function Header() {
@@ -53,7 +54,7 @@ export function Header() {
     e.preventDefault()
     const v = q.trim()
     if (!v) return
-    navigate(`/search?q=${encodeURIComponent(v)}`)
+    navigate(`/search?q=${encodeURIComponent(v)}`, { viewTransition: true })
     input.current?.blur()
     setMobileSearch(false)
   }

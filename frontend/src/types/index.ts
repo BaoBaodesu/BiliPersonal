@@ -1,4 +1,4 @@
-export type FeedType = 'for_you' | 'hot' | 'explore'
+export type FeedType = 'for_you' | 'hot' | 'explore' | 'following'
 
 export interface Video {
   recommendation_id?: number
@@ -18,6 +18,9 @@ export interface Video {
   tags?: string[]
   source?: string
   rcmd_reason?: string
+  source_reason?: string
+  seed_bvid?: string
+  seed_title?: string
   rating?: number | null
   matched_tags?: string[]
   rank?: number
@@ -36,7 +39,8 @@ export interface FeedPage {
   from_cache: boolean
   ranked: boolean
   model: string
-  notice: 'rate_limited' | null
+  notice: 'rate_limited' | 'accumulating' | 'following_stale' | null
+  following_freshness?: { status: 'checked' | 'stale'; checked_at: number | null; reason?: string }
 }
 
 export interface Category {
@@ -83,6 +87,13 @@ export interface SystemStatus {
 }
 
 export type FeedbackAction = 'like' | 'not_interested' | 'block_up' | 'watched' | 'watch_later' | 'click' | 'undo'
+export type FeedbackReason = 'uploader' | 'topic' | 'clickbait'
+export type SourceLevel = 'off' | 'fallback' | 'small' | 'standard'
+export interface SourceSettings { hot: SourceLevel; rcmd: SourceLevel; classic: boolean }
+export interface SourceStatus {
+  settings: SourceSettings
+  report: { days: number; total: number; sources: { source: string; served: number; exposed: number; share: number; click_rate: number | null; not_interested_rate: number | null }[] }
+}
 
 export interface Explain {
   bvid: string
@@ -91,6 +102,9 @@ export interface Explain {
   same_author: boolean
   source: string
   rcmd_reason: string
+  source_reason?: string
+  seed_video?: { bvid: string; title: string } | null
+  up_affinity?: { level: 'regular' | 'familiar' | 'stranger'; watched_count: number; following: boolean } | null
 }
 
 export interface KeywordRule {
@@ -100,7 +114,7 @@ export interface KeywordRule {
   created_at: number
 }
 
-export type FilterTarget = 'title' | 'uploader' | 'tag'
+export type FilterTarget = 'title' | 'uploader' | 'tag' | 'zone'
 export type FilterMatchMode = 'contains' | 'exact' | 'regex'
 export type FilterAction = 'hard_block' | 'downrank'
 
@@ -189,7 +203,7 @@ export interface Interests {
 }
 
 export interface DebugInfo {
-  pool: { hot: number; rcmd: number; total: number }
+  pool: { hot: number; rcmd: number; follow: number; up_archive: number; related: number; total: number }
   valid_candidates: number
   served: Record<string, number>
   recent_streams: { feed_type: string; category: string; pages: number; last: number }[]

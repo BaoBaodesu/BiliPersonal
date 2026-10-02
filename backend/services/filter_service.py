@@ -9,7 +9,7 @@
 - blocked_ups          → 按 mid / name 精确屏蔽某一个已知 UP（保留原有行为）
 - filter_rules(uploader) → UP 名称包含关键词即屏蔽，不一定对应唯一 mid
 - filter_rules(title)    → 视频标题（+ 标签）包含关键词即屏蔽
-- filter_rules(tag)      → 预留，本版本不启用匹配
+- filter_rules(tag/zone) → 标签 / 分区匹配；降权仅打标记
 
 匹配字段：
 - 标题：video["title"]（并附带 tags 一起匹配，与原 v0.2 行为一致）
@@ -26,11 +26,13 @@ import time
 
 from backend.config import DB_PATH
 from backend.storage.database import get_state, now, set_state
+from backend.services import feed_performance as perf
 
 TARGET_TITLE = "title"
 TARGET_UPLOADER = "uploader"
 TARGET_TAG = "tag"
-TARGET_TYPES = (TARGET_TITLE, TARGET_UPLOADER, TARGET_TAG)
+TARGET_ZONE = "zone"
+TARGET_TYPES = (TARGET_TITLE, TARGET_UPLOADER, TARGET_TAG, TARGET_ZONE)
 
 MATCH_CONTAINS = "contains"
 MATCH_EXACT = "exact"
@@ -55,7 +57,7 @@ def normalize(keyword):
 
 
 def _connect():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = perf.sql_connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -102,8 +104,7 @@ class FilterService:
                 rows = [
                     dict(r)
                     for r in conn.execute(
-                        "SELECT * FROM filter_rules WHERE enabled = 1 AND action = ? ORDER BY id",
-                        (ACTION_HARD_BLOCK,),
+                        "SELECT * FROM filter_rules WHERE enabled = 1 ORDER BY id",
                     ).fetchall()
                 ]
                 ups = [
@@ -115,6 +116,8 @@ class FilterService:
 
             title_rules = []
             uploader_rules = []
+            tag_rules = []
+            zone_rules = []
             for r in rows:
                 norm = r["keyword_norm"] or normalize(r["keyword"])
                 if not norm:
@@ -125,16 +128,23 @@ class FilterService:
                     "keyword_norm": norm,
                     "match_mode": r["match_mode"],
                     "target_type": r["target_type"],
+                    "action": r["action"],
                 }
                 if r["target_type"] == TARGET_TITLE:
                     title_rules.append(entry)
                 elif r["target_type"] == TARGET_UPLOADER:
                     uploader_rules.append(entry)
+                elif r["target_type"] == TARGET_TAG:
+                    tag_rules.append(entry)
+                elif r["target_type"] == TARGET_ZONE:
+                    zone_rules.append(entry)
 
             self._cache = {
                 "version": version,
                 "title": title_rules,
                 "uploader": uploader_rules,
+                "tag": tag_rules,
+                "zone": zone_rules,
                 "blocked_mids": {u["mid"] for u in ups if u["mid"] is not None},
                 "blocked_names": {u["name"] for u in ups if u["name"] and u["mid"] is None},
             }
@@ -184,43 +194,49 @@ class FilterService:
             return True
         return bool(author) and author in rules["blocked_names"]
 
+    @perf.measured("filter_ms")
     def filter_candidates(self, candidates, record=False):
-        """按任务书顺序过滤：精确 MID → UP 关键词 → 标题关键词。
+        """按任务书顺序过滤：精确 MID → UP 关键词 → 标题关键词 → 标签 → 分区。
 
         返回 (保留的视频列表, 统计)。record=True 时把命中写入 hit_count（同一视频
         命中同一规则只记 1 次；命中多条规则各自 +1）。
         """
         rules = self.load_rules()
+        from backend.services.affinity import affinity, up_key
+        penalties = affinity.penalties()
         kept = []
-        stats = {"input": len(candidates), "blocked_mid": 0, "blocked_uploader": 0, "blocked_title": 0}
+        stats = {"input": len(candidates), "blocked_mid": 0, "blocked_uploader": 0, "blocked_title": 0, "blocked_tag": 0, "blocked_zone": 0}
         pending = {}
 
         for video in candidates:
+            video = dict(video)
+            video.pop("downrank", None)
+            video.pop("expand_disabled", None)
             bvid = video.get("bvid") or ""
             # 1) 精确屏蔽 UP（mid / name）
             if self.match_exact_up(video, rules):
                 stats["blocked_mid"] += 1
                 continue
-            # 2) UP 名称关键词
-            up_hits = self.match_uploader(video.get("author"), rules)
-            if up_hits:
-                stats["blocked_uploader"] += 1
+            tags = video.get("tag") or video.get("tags") or []
+            for target, hits in (
+                ("uploader", self.match_uploader(video.get("author"), rules)),
+                ("title", self.match_title(video.get("title"), tags, rules)),
+                ("tag", [r for r in rules["tag"] if any(self._match_one(r["match_mode"], r["keyword_norm"], normalize(tag)) for tag in tags)]),
+                ("zone", [r for r in rules["zone"] if self._match_one(r["match_mode"], r["keyword_norm"], normalize(video.get("tname")))]),
+            ):
                 if record:
-                    for r in up_hits:
+                    for r in hits:
                         pending[(r["id"], bvid)] = r["id"]
-                continue
-            # 3) 标题关键词
-            title_hits = self.match_title(
-                video.get("title"), video.get("tag") or video.get("tags"), rules
-            )
-            if title_hits:
-                stats["blocked_title"] += 1
-                if record:
-                    for r in title_hits:
-                        pending[(r["id"], bvid)] = r["id"]
-                continue
-            # 4) 未来 tag rules（本版本 filter_rules 中 target_type='tag' 不参与匹配）
-            kept.append(video)
+                if any(r["action"] == ACTION_HARD_BLOCK for r in hits):
+                    stats["blocked_" + target] += 1
+                    break
+                if hits:
+                    video["downrank"] = True
+            else:
+                for penalty in penalties:
+                    if (penalty["kind"] in ("up", "expand_up") and penalty["key"] == up_key(video)) or (penalty["kind"] == "tag" and penalty["key"] in [normalize(tag) for tag in tags]):
+                        video["expand_disabled" if penalty["kind"] == "expand_up" else "downrank"] = True
+                kept.append(video)
 
         if record and pending:
             self.record_hits(pending)

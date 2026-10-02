@@ -13,12 +13,14 @@ from backend.services.bilibili_service import bili
 from backend.services.recommendation_service import recommendation
 from backend.services.training_service import training
 from backend.storage.database import init_db
+from backend.services import feed_performance as perf
 
 
 def create_app(start_background=True):
     init_db()
     app = Flask(__name__, static_folder=None)
     app.json.ensure_ascii = False
+    perf.install(app)
 
     for module in (auth, feed, feedback, system, user):
         app.register_blueprint(module.bp)

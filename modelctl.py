@@ -7,10 +7,11 @@ from backend.services.model_registry import registry
 
 def main():
     parser = argparse.ArgumentParser(description="BiliPersonal v0.3 模型管理")
-    parser.add_argument("command", choices=["list", "switch", "rollback", "train", "evaluate", "finish", "blind-capture", "blind-report", "approve-trial", "stop-trial", "observe"])
+    parser.add_argument("command", choices=["list", "switch", "rollback", "train", "evaluate", "finish", "blind-capture", "blind-report", "approve-trial", "approve-activate", "stop-trial", "observe"])
     parser.add_argument("version", nargs="?")
     parser.add_argument("--quality", action="store_true", help="独立 Quality 实验，默认关闭")
     parser.add_argument("--diversity", action="store_true", help="独立排序策略实验，默认关闭")
+    parser.add_argument("--confirm", action="store_true", help="确认五批盲评结果并批准首次排序器准入")
     args = parser.parse_args()
     if args.command not in ("list", "observe"):
         import socket
@@ -65,6 +66,9 @@ def main():
     elif args.command in ("evaluate", "finish"):
         from backend.services.evaluation_service import evaluation
         result = evaluation.check() if args.command == "evaluate" else evaluation.finish()
+    elif args.command == "approve-activate":
+        from backend.services.blind_review import approve_activate
+        result = approve_activate(args.version, args.confirm)
     elif args.command.startswith("blind-") or args.command == "approve-trial":
         from backend.services.blind_review import capture, report
         if args.command == "blind-capture":

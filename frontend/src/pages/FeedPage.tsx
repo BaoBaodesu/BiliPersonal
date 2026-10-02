@@ -12,13 +12,13 @@ import { EmptyState } from '../components/EmptyState'
 import { ErrorState } from '../components/ErrorState'
 import type { ApiError } from '../api/client'
 
-const TITLES: Record<FeedType, string> = { for_you: '为你推荐', hot: '热门', explore: '兴趣探索' }
+const TITLES: Record<FeedType, string> = { for_you: '为你推荐', hot: '热门', explore: '兴趣探索', following: '关注' }
 const DEFAULT_CATEGORIES: Category[] = [{ id: 'all', name: '全部' }]
 
 export function FeedPage({ type }: { type: FeedType }) {
   const [category, setCategory] = useState('all')
   const viewId = useMemo(() => crypto.randomUUID(), [type, category])
-  const { data: cats } = useQuery({ queryKey: keys.categories, queryFn: api.feed.categories, staleTime: 10 * 60_000 })
+  const { data: cats } = useQuery({ queryKey: keys.categories, queryFn: api.feed.categories, staleTime: 10 * 60_000, enabled: type !== 'following' })
   const feed = useFeed(type, category, viewId)
   const refresh = useRefreshFeed(type, category, viewId)
   const first = feed.data?.pages[0]
@@ -68,7 +68,9 @@ export function FeedPage({ type }: { type: FeedType }) {
         title={category === 'all' ? '暂时没有新的推荐' : '这个分类下暂时没有推荐'}
         description={
           category === 'all'
-            ? '候选池中的视频都已经展示过或被过滤了。稍后换一批，会重新抓取新的候选。'
+            ? first?.notice === 'accumulating'
+              ? '个性化候选仍在积累，或已被观看、冷却和屏蔽规则过滤。稍后换一批，或在设置中调整推荐来源。'
+              : type === 'following' ? '关注动态暂时没有可用的视频，稍后刷新试试。' : '候选池中的视频都已经展示过或被过滤了。稍后换一批，会重新抓取新的候选。'
             : '换个分类看看，或者稍后再来。'
         }
         action={{ label: '换一批', onClick: () => refresh.mutate() }}
@@ -111,7 +113,7 @@ export function FeedPage({ type }: { type: FeedType }) {
       <h1 className="sr-only">{TITLES[type]}</h1>
       <div className="sticky top-14 z-20 -mx-4 mb-4 bg-bg px-4 py-1.5 sm:-mx-6 sm:px-6">
         <FeedToolbar first={first} onRefresh={() => refresh.mutate()} refreshing={refresh.isPending}>
-          <CategoryChips categories={cats?.items ?? DEFAULT_CATEGORIES} value={category} onChange={setCategory} />
+          {type === 'following' ? <span className="text-sm font-medium">关注 · 最新发布</span> : <CategoryChips categories={cats?.items ?? DEFAULT_CATEGORIES} value={category} onChange={setCategory} />}
         </FeedToolbar>
       </div>
       {refresh.isPending && (

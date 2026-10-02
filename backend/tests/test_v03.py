@@ -42,6 +42,8 @@ class V03Test(unittest.TestCase):
                         patch.object(registry,"_loaded", {"old": FakeBundle(), "new": FakeBundle(), "anchor": FakeBundle()})]
         for p in self.patches: p.start()
         db.init_db()
+        # v0.3 回归仍验证经典路径，混合来源的默认行为由 test_v031 单独覆盖。
+        db.set_state("sources:settings", {"hot": "fallback", "rcmd": "small", "classic": True})
         fs.filters.invalidate()
         registry.update(active="old",anchor=None,trial=None,evaluation=None,pending=None,auto_paused=False)
 

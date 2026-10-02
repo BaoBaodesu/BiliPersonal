@@ -4,6 +4,9 @@ import type {
   DebugInfo,
   Explain,
   FeedbackAction,
+  FeedbackReason,
+  SourceSettings,
+  SourceStatus,
   FeedbackRecord,
   FeedPage,
   FeedType,
@@ -86,8 +89,8 @@ export const api = {
       `/search?q=${encodeURIComponent(q)}&page=${page}`,
     ),
   feedback: {
-    send: (bvid: string, action: FeedbackAction, video?: Partial<Video>, event_id = crypto.randomUUID()) =>
-      post<{ ok?: boolean; undone?: boolean }>('/feedback', { bvid, action, video, event_id,
+    send: (bvid: string, action: FeedbackAction, video?: Partial<Video>, event_id = crypto.randomUUID(), reason?: FeedbackReason) =>
+      post<{ ok?: boolean; undone?: boolean }>('/feedback', { bvid, action, video, event_id, reason,
         recommendation_id: video?.recommendation_id, view_id: video?.view_id,
         exposure_id: video?.recommendation_id && video.view_id ? `${video.view_id}:${video.recommendation_id}` : undefined }),
     history: (action?: string) =>
@@ -157,6 +160,8 @@ export const api = {
     watchLater: () => request<{ items: (Video & { feedback_id: number; saved_at: number })[] }>('/user/watch-later'),
   },
   system: {
+    sources: () => request<SourceStatus>('/system/sources'),
+    setSources: (settings: Partial<SourceSettings>) => request<SourceStatus>('/system/sources', { method: 'PUT', body: JSON.stringify(settings) }),
     status: () => request<SystemStatus>('/system/status'),
     retrain: () => post<{ started: boolean }>('/system/retrain'),
     debug: () => request<DebugInfo>('/system/debug'),

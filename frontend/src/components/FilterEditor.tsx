@@ -6,11 +6,13 @@ import { keys } from '../hooks/queries'
 import type { FilterAction, FilterRule, FilterTarget, FilterMatchMode } from '../types'
 import { useToast } from '../stores/ui'
 
-export type FilterTab = 'title' | 'uploader' | 'ups'
+export type FilterTab = 'title' | 'uploader' | 'tag' | 'zone' | 'ups'
 
 const TARGET_OF_TAB: Record<Exclude<FilterTab, 'ups'>, FilterTarget> = {
   title: 'title',
   uploader: 'uploader',
+  tag: 'tag',
+  zone: 'zone',
 }
 
 const MATCH_LABEL: Record<FilterMatchMode, string> = {
@@ -34,6 +36,8 @@ const SOURCE_LABEL: Record<string, string> = {
 const PLACEHOLDER: Record<Exclude<FilterTab, 'ups'>, string> = {
   title: '标题关键词，如：大冰、广告、考研',
   uploader: 'UP 主名称关键词，如：数码、差评君',
+  tag: '标签关键词，如：广告、游戏',
+  zone: '分区名称，如：生活、科技',
 }
 
 // 过滤规则编辑：标题关键词 / UP 主关键词 / 精确屏蔽 UP 三类管理
@@ -113,6 +117,7 @@ export function FilterEditor({ tab }: { tab: FilterTab }) {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             maxLength={60}
+            aria-label="新增过滤规则"
             placeholder={PLACEHOLDER[tab]}
             className="h-10 flex-1 rounded-lg border border-line bg-bg px-3 outline-none focus:border-accent"
           />
@@ -243,7 +248,7 @@ export function FilterEditor({ tab }: { tab: FilterTab }) {
 
       {isRulesTab && rulesQuery.data?.summary && (
         <p className="mt-4 text-xs text-muted">
-          {tab === 'title' ? '标题' : 'UP'} 规则共{' '}
+          {tab === 'title' ? '标题' : tab === 'uploader' ? 'UP' : tab === 'tag' ? '标签' : '分区'} 规则共{' '}
           {rulesQuery.data.summary.by_target.find((s) => s.target_type === targetType)?.total ?? 0} 条 ·
           规则版本 v{rulesQuery.data.summary.version}
         </p>
@@ -299,10 +304,12 @@ function RuleRow({ rule, onChanged }: { rule: FilterRule; onChanged: () => void 
         <span>{MATCH_LABEL[rule.match_mode]}</span>
         <button
           type="button"
+          disabled={update.isPending}
           onClick={() =>
             update.mutate({ action: rule.action === 'hard_block' ? 'downrank' : 'hard_block' })
           }
-          title="点击切换行为"
+          title="点击切换屏蔽 / 降权"
+          aria-label={`${rule.keyword}：${ACTION_LABEL[rule.action]}，点击切换`}
           className={`rounded px-1.5 py-0.5 ${
             rule.action === 'hard_block' ? 'bg-danger/10 text-danger' : 'bg-surface-hover'
           }`}

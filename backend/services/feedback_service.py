@@ -17,6 +17,7 @@ from backend.storage.database import connect, now, rows_to_dicts
 ACTIONS = ("like", "not_interested", "block_up", "watched", "watch_later", "click", "undo")
 # 这些反馈会让视频不再出现在推荐中
 HIDING_ACTIONS = ("not_interested", "block_up", "watched")
+REASONS = ("uploader", "topic", "clickbait")
 
 
 class FeedbackError(Exception):
@@ -29,13 +30,15 @@ class FeedbackService:
             raise FeedbackError(f"unknown action: {action}")
         video = video or {}
         context = context or {}
+        if context.get("reason") is not None and (action != "not_interested" or context["reason"] not in REASONS):
+            raise FeedbackError("非法不感兴趣原因")
         if context.get("event_id") is not None and (not isinstance(context["event_id"], str) or not 1 <= len(context["event_id"]) <= 128):
             raise FeedbackError("非法反馈事件标识")
         with connect() as conn:
             if context.get("event_id"):
-                existing = conn.execute("SELECT bvid,action,recommendation_id FROM feedback WHERE event_id=?", (context["event_id"],)).fetchone()
+                existing = conn.execute("SELECT bvid,action,recommendation_id,reason FROM feedback WHERE event_id=?", (context["event_id"],)).fetchone()
                 if existing:
-                    if existing["bvid"] != bvid or existing["action"] != action or existing["recommendation_id"] != context.get("recommendation_id"):
+                    if existing["bvid"] != bvid or existing["action"] != action or existing["recommendation_id"] != context.get("recommendation_id") or existing["reason"] != context.get("reason"):
                         raise FeedbackError("反馈事件标识冲突")
                     return {"ok": True}
             if action == "undo":
@@ -52,6 +55,7 @@ class FeedbackService:
                 ).fetchone()
                 if row:
                     conn.execute("UPDATE feedback SET revoked_at=? WHERE id=?", (now(),row["id"]))
+                    conn.execute("UPDATE interest_penalties SET revoked_at=? WHERE feedback_id=?", (now(),row["id"]))
                     saved = json.loads(row["video"] or "{}")
                     if row["action"] == "block_up":
                         if row["blocked_up_id"]:
@@ -75,10 +79,26 @@ class FeedbackService:
                 conn.execute("UPDATE recommendation_history SET " + ("clicked = 1" if action == "click" else "feedback = ?") + " WHERE id = ?",
                              (associated[0]["id"],) if action == "click" else (action, associated[0]["id"]))
             result = conn.execute(
-                "INSERT INTO feedback(bvid, action, video, created_at,recommendation_id,exposure_id,event_id) VALUES(?, ?, ?, ?,?,?,?)",
+                "INSERT INTO feedback(bvid, action, video, created_at,recommendation_id,exposure_id,event_id,reason) VALUES(?, ?, ?, ?,?,?,?,?)",
                 (bvid, action, json.dumps(_brief(video), ensure_ascii=False), now(), context.get("recommendation_id"),
-                 associated[1] if associated else None, context.get("event_id")),
+                 associated[1] if associated else None, context.get("event_id"), context.get("reason")),
             )
+            if action == "not_interested":
+                from backend.config import SOURCE_PENALTY_DAYS
+                from backend.services.affinity import affinity, up_key
+                from backend.services.filter_service import normalize
+                penalties = []
+                if context.get("reason") == "topic":
+                    tags = video.get("tag") or video.get("tags") or []
+                    if tags:
+                        penalties.append(("tag", normalize(tags[0])))
+                elif context.get("reason") in ("uploader", "clickbait") and up_key(video):
+                    penalties.append(("up", up_key(video)))
+                if up_key(video) and affinity.is_stranger(video):
+                    penalties.append(("expand_up", up_key(video)))
+                for kind, key in penalties:
+                    conn.execute("INSERT INTO interest_penalties(kind,key,reason,feedback_id,created_at,expires_at) VALUES(?,?,?,?,?,?)",
+                                 (kind,key,context.get("reason"),result.lastrowid,now(),now()+SOURCE_PENALTY_DAYS*86400))
             if action == "block_up" and video.get("author"):
                 exists = conn.execute(
                     "SELECT 1 FROM blocked_ups WHERE (mid IS NULL AND name = ?) OR mid = ?",
@@ -112,6 +132,7 @@ class FeedbackService:
         with connect() as conn:
             row = conn.execute("SELECT action,blocked_up_id FROM feedback WHERE id=? AND revoked_at IS NULL", (feedback_id,)).fetchone()
             conn.execute("UPDATE feedback SET revoked_at=? WHERE id=?", (now(),feedback_id))
+            conn.execute("UPDATE interest_penalties SET revoked_at=? WHERE feedback_id=?", (now(),feedback_id))
             if row and row["action"] == "block_up" and row["blocked_up_id"]:
                 conn.execute("DELETE FROM blocked_ups WHERE id=?", (row["blocked_up_id"],))
                 _bump_filter_version(conn)

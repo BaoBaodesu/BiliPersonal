@@ -36,6 +36,7 @@ const router = createBrowserRouter([
     element: <AppShell />,
     children: [
       { path: '/', element: <FeedPage key="for_you" type="for_you" /> },
+      { path: '/following', element: <FeedPage key="following" type="following" /> },
       { path: '/trending', element: <FeedPage key="hot" type="hot" /> },
       { path: '/explore', element: <FeedPage key="explore" type="explore" /> },
       { path: '/search', element: <SearchPage /> },

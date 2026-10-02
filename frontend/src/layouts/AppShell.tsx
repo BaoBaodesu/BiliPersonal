@@ -22,7 +22,7 @@ export function AppShell() {
     <div className="min-h-full">
       <Header />
       <Sidebar />
-      <main className={`pt-14 ${expanded ? 'lg:pl-60' : 'lg:pl-[72px]'}`}>
+      <main className={`app-main pt-14 ${expanded ? 'lg:pl-60' : 'lg:pl-[72px]'}`}>
         <div className="mx-auto max-w-[2200px] px-4 pb-10 sm:px-6">
           {auth.isError && (auth.error as { code?: string }).code === 'offline' ? (
             <OfflineState
@@ -35,7 +35,9 @@ export function AppShell() {
               {!online && (
                 <div className="mt-2 rounded-lg bg-surface px-4 py-2 text-sm text-muted">当前处于离线状态，显示的是已缓存内容。</div>
               )}
-              <Outlet />
+              <div className="page-content">
+                <Outlet />
+              </div>
             </>
           )}
         </div>

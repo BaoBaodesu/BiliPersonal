@@ -97,10 +97,10 @@ export function UserAvatar() {
             ))}
           </div>
           <div className="py-2">
-            <Link role="menuitem" to="/settings/filters" className={item} onClick={() => setOpen(false)}>
+            <Link role="menuitem" to="/settings/filters" viewTransition className={item} onClick={() => setOpen(false)}>
               <SlidersHorizontal size={20} /> 过滤规则
             </Link>
-            <Link role="menuitem" to="/settings" className={item} onClick={() => setOpen(false)}>
+            <Link role="menuitem" to="/settings" viewTransition className={item} onClick={() => setOpen(false)}>
               <Settings size={20} /> 设置
             </Link>
             <button role="menuitem" className={item} onClick={logout}>

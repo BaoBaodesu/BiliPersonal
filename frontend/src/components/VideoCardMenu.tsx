@@ -14,7 +14,7 @@ import {
   ArrowLeft,
   Loader2,
 } from 'lucide-react'
-import type { Video } from '../types'
+import type { Video, FeedbackReason } from '../types'
 import { useBlockKeyword, useFeedback } from '../hooks/queries'
 import { useToast } from '../stores/ui'
 import { ExplainDialog } from './ExplainDialog'
@@ -28,6 +28,7 @@ interface Props {
 export function VideoCardMenu({ video, inFeed = true }: Props) {
   const [open, setOpen] = useState(false)
   const [keywordMode, setKeywordMode] = useState(false)
+  const [reasonMode, setReasonMode] = useState(false)
   const [explain, setExplain] = useState(false)
   const [pos, setPos] = useState({ top: 0, left: 0 })
   const btn = useRef<HTMLButtonElement>(null)
@@ -73,7 +74,7 @@ export function VideoCardMenu({ video, inFeed = true }: Props) {
       top: Math.max(8, Math.min(r.bottom + 4 + menu.current.offsetHeight > window.innerHeight - 8 ? r.top - menu.current.offsetHeight - 4 : r.bottom + 4, window.innerHeight - menu.current.offsetHeight - 8)),
     })
     menu.current.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true })
-  }, [open, keywordMode])
+  }, [open, keywordMode, reasonMode])
 
   const toggle = (e: React.MouseEvent) => {
     e.preventDefault()
@@ -84,11 +85,12 @@ export function VideoCardMenu({ video, inFeed = true }: Props) {
     const top = r.bottom + 4
     setPos({ top, left })
     setKeywordMode(false)
+    setReasonMode(false)
     setOpen((o) => !o)
   }
 
-  const act = (action: 'not_interested' | 'block_up' | 'watched' | 'watch_later' | 'like') => {
-    feedback.mutate({ video, action })
+  const act = (action: 'not_interested' | 'block_up' | 'watched' | 'watch_later' | 'like', reason?: FeedbackReason) => {
+    feedback.mutate({ video, action, reason })
     setOpen(false)
   }
 
@@ -126,9 +128,16 @@ export function VideoCardMenu({ video, inFeed = true }: Props) {
             style={{ top: pos.top, left: pos.left }}
             className="fade-in fixed z-50 max-h-[calc(100dvh-16px)] w-66 max-w-[calc(100vw-16px)] overflow-y-auto rounded-xl bg-elevated py-2 shadow-pop"
           >
-            {!keywordMode ? (
+            {reasonMode ? (
               <>
-                <button role="menuitem" className={item} onClick={() => act('not_interested')}>
+                <button role="menuitem" className={item} onClick={() => setReasonMode(false)}><ArrowLeft size={20} />返回操作</button>
+                <button role="menuitem" className={item} onClick={() => act('not_interested', 'uploader')}><UserX size={20} />不喜欢这个 UP</button>
+                <button role="menuitem" className={item} onClick={() => act('not_interested', 'topic')}><Tag size={20} />不喜欢这个题材</button>
+                <button role="menuitem" className={item} onClick={() => act('not_interested', 'clickbait')}><EyeOff size={20} />标题或封面党</button>
+              </>
+            ) : !keywordMode ? (
+              <>
+                <button role="menuitem" className={item} onClick={() => setReasonMode(true)}>
                   <EyeOff size={20} /> 不感兴趣
                 </button>
                 <button role="menuitem" className={item} onClick={() => act('block_up')}>

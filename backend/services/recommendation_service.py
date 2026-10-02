@@ -12,18 +12,25 @@ import threading
 import time
 import traceback
 import uuid
+import sqlite3
+from contextlib import contextmanager
 
-from backend.config import SERVED_WINDOW
-from backend.services.bilibili_service import LoginExpired, bili
+from backend.config import SERVED_WINDOW, FOLLOW_WINDOW, SOURCE_SYNC_DETAILS, SOURCE_DEFAULTS
+from backend.services.affinity import affinity, up_key
+from backend.services.source_mixer import settings, mix
+from backend.services.bilibili_service import BiliError, LoginExpired, bili
 from backend.services.cache_service import pool
 from backend.services.filter_service import filters
 from backend.services.training_service import training
-from backend.storage.database import connect, now, rows_to_dicts
+from backend.storage.database import connect, now, rows_to_dicts, get_state
+from backend.services import feed_performance as perf
+from backend.services import request_coordination as requests_scope
 
 FEED_SOURCES = {
     "for_you": ("hot", "rcmd"),
     "hot": ("hot",),
     "explore": ("rcmd",),
+    "following": ("follow",),
 }
 DEFAULT_LIMIT = 12
 MAX_LIMIT = 24
@@ -38,6 +45,8 @@ class FeedError(Exception):
 class RecommendationService:
     def __init__(self):
         self._gen_lock = threading.Lock()
+        self._streams_lock = threading.Lock()
+        self._stream_locks = {}
         self._prefetching = set()
         training.on_model_changed(self._on_model_changed)
 
@@ -57,8 +66,13 @@ class RecommendationService:
         if not isinstance(view_id, str) or not 1 <= len(view_id) <= 128:
             raise FeedError("invalid view id")
         from backend.services.experiment_service import experiments
+        # 已有批次读取无需等待别的 stream 准备候选或提交。
+        with connect() as conn:
+            existing = conn.execute("SELECT stream_id FROM feed_streams WHERE view_id=? AND feed_type=? AND category=?", (view_id,feed_type,category)).fetchone()
+        if existing:
+            return self._page(existing[0], feed_type, category, 0, limit, view_id)
         # 先持久化批次，网络失败重试也沿用分组和模型。
-        with self._gen_lock:
+        with perf.lock(self._gen_lock, "gen_lock"):
             with connect() as conn:
                 existing = conn.execute("SELECT stream_id FROM feed_streams WHERE view_id=? AND feed_type=? AND category=?", (view_id,feed_type,category)).fetchone()
                 if existing:
@@ -68,6 +82,7 @@ class RecommendationService:
                     context = experiments.context(feed_type, category, view_id)
                     conn.execute("INSERT INTO feed_streams(stream_id,view_id,feed_type,category,page_limit,model_version,experiment_id,arm,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
                                  (stream_id,view_id,feed_type,category,limit,context["model_version"],context["experiment_id"],context["arm"],now()))
+                    conn.execute("INSERT INTO app_state(key,value,updated_at) VALUES(?,?,?)", (f"stream:{stream_id}:sources",json.dumps(settings()),now()))
         return self._page(stream_id, feed_type, category, 0, limit, view_id)
 
     def explain(self, bvid):
@@ -94,17 +109,19 @@ class RecommendationService:
             "same_author": any(r["same_author"] for r in related),
             "source": video.get("source"),
             "rcmd_reason": video.get("rcmd_reason", ""),
+            "source_reason": video.get("source_reason") or self._source_reason(video),
+            "seed_video": {"bvid": video["seed_bvid"], "title": video.get("seed_title", "")} if video.get("seed_bvid") else None,
+            "up_affinity": affinity.snapshot()["ups"].get(up_key(video)),
         }
 
     def categories(self):
         """首页 Category Chips：历史分区在前，候选池分区补充"""
-        from backend.recommender.recommender import read_history
-
         counts = {}
-        for h in read_history():
+        for h in affinity.history():
             if h.get("tname"):
                 counts[h["tname"]] = counts.get(h["tname"], 0) + 3
-        for v in pool.all(("hot", "rcmd")):
+        from backend.services.cache_service import SOURCES
+        for v in pool.all(SOURCES):
             if v.get("tname"):
                 counts[v["tname"]] = counts.get(v["tname"], 0) + 1
         zones = [z for z, _ in sorted(counts.items(), key=lambda kv: kv[1], reverse=True) if z != "其他"][:10]
@@ -131,6 +148,7 @@ class RecommendationService:
         return {"items": rows, "total": total}
 
     def debug(self):
+        from backend.services.cache_service import SOURCES
         with connect() as conn:
             served = conn.execute("SELECT feed_type, COUNT(*) AS n FROM served_videos GROUP BY feed_type").fetchall()
             streams = conn.execute(
@@ -139,12 +157,12 @@ class RecommendationService:
             ).fetchall()
         valid = 0
         if training.recommender:
-            valid = sum(1 for v in pool.all(("hot", "rcmd")) if
+            valid = sum(1 for v in pool.all(SOURCES) if
                         (all(v.get(k) is not None for k in ("view","like","favorite")) if str(training.model_version).startswith("ranker-v03-")
                          else training.recommender.known_tags(v.get("tag") or [])))
         return {
-            "pool": {"hot": pool.count("hot"), "rcmd": pool.count("rcmd"), "total": pool.count()},
-            "pool_state": {s: pool.state(s) for s in ("hot", "rcmd")},
+            "pool": {**{source: pool.count(source) for source in SOURCES}, "total": pool.count()},
+            "pool_state": {s: pool.state(s) for s in SOURCES},
             "valid_candidates": valid,
             "served": {r["feed_type"]: r["n"] for r in served},
             "recent_streams": rows_to_dicts(streams),
@@ -157,9 +175,16 @@ class RecommendationService:
         with connect() as conn:
             conn.execute("DELETE FROM feed_cache")
             conn.execute("DELETE FROM served_videos")
+            conn.execute("DELETE FROM app_state WHERE key LIKE 'stream:%:page:%:preparation'")
 
     def warmup(self):
         """登录后 / 启动时：后台准备候选池与首页第一页"""
+        from backend.services.source_scheduler import scheduler
+        scheduler.start()
+        if not settings()["classic"]:
+            from backend.services.model_registry import registry
+            scheduler.request_refill("for_you", "all", DEFAULT_LIMIT, settings(), registry.state().get("active") or "fallback-v03")
+            return
 
         def run():
             try:
@@ -173,8 +198,13 @@ class RecommendationService:
 
         self._background(run, "warmup")
 
-    def prefetch(self, feed_type):
+    def prefetch(self, feed_type, context=None, category="all", limit=DEFAULT_LIMIT):
         """剩余可用候选不足两页时，后台再抓一页"""
+        if feed_type == "following" or not (context or {}).get("sources_settings", settings())["classic"]:
+            from backend.services.source_scheduler import scheduler
+            from backend.services.model_registry import registry
+            scheduler.request_refill(feed_type, category, limit, (context or {}).get("sources_settings", settings()), (context or {}).get("model_version", registry.state().get("active") or "fallback-v03"))
+            return
 
         def run():
             try:
@@ -191,29 +221,50 @@ class RecommendationService:
     # ---------------- 分页生成 ----------------
 
     def _page(self, stream_id, feed_type, category, page, limit, view_id=None):
-        with self._gen_lock:
-            with connect() as conn:
-                row = conn.execute("SELECT * FROM feed_streams WHERE stream_id=?", (stream_id,)).fetchone()
-            if not row or row["feed_type"] != feed_type or row["category"] != category or page < 0 or (view_id and row["view_id"] != view_id):
-                raise FeedError("invalid or expired stream")
-            context = dict(row)
-            from backend.services.model_registry import registry
-            ended = registry.state().get("last_trial")
-            if context["experiment_id"] and (not ended or ended["id"] != context["experiment_id"]):
-                path = registry.root / "experiments" / context["experiment_id"] / "trial.json"
-                if path.exists():
-                    ended = json.loads(path.read_text(encoding="utf-8"))
-            if context["experiment_id"] and context["arm"] == "candidate" and ended and ended["id"] == context["experiment_id"] and ended["status"] in ("stopped","rejected"):
-                raise FeedError("在线试用已停止，请换一批继续使用当前模型")
-            limit = row["page_limit"]
-            cached = self._cached_page(stream_id, page)
-            if cached is None:
-                cached = self._generate(stream_id, feed_type, category, page, limit, context)
+        with connect() as conn:
+            row = conn.execute("SELECT * FROM feed_streams WHERE stream_id=?", (stream_id,)).fetchone()
+        if not row or row["feed_type"] != feed_type or row["category"] != category or page < 0 or (view_id and row["view_id"] != view_id):
+            raise FeedError("invalid or expired stream")
+        context = dict(row)
+        from backend.services.source_scheduler import scheduler
+        context["request_stop"] = scheduler._stop
+        context["sources_settings"] = get_state(f"stream:{stream_id}:sources", {**SOURCE_DEFAULTS, "classic": True})
+        if perf.current():
+            perf.current().info.update(feed_type=feed_type, category=category, page=page, limit=row["page_limit"],
+                                       mode="classic" if context["sources_settings"]["classic"] else "mixed",
+                                       model_version=context["model_version"], sources_settings=context["sources_settings"],
+                                       rate_limited_at_start=bili.rate_limited,
+                                       backoff_remaining_ms=max(0, bili.rate_limited_until - time.time()) * 1000)
+        from backend.services.model_registry import registry
+        ended = registry.state().get("last_trial")
+        if context["experiment_id"] and (not ended or ended["id"] != context["experiment_id"]):
+            path = registry.root / "experiments" / context["experiment_id"] / "trial.json"
+            if path.exists():
+                ended = json.loads(path.read_text(encoding="utf-8"))
+        if context["experiment_id"] and context["arm"] == "candidate" and ended and ended["id"] == context["experiment_id"] and ended["status"] in ("stopped","rejected"):
+            raise FeedError("在线试用已停止，请换一批继续使用当前模型")
+        limit = row["page_limit"]
+        cached = self._cached_page(stream_id, page)
+        if perf.current():
+            perf.current().info["feed_page_cache_hit"] = cached is not None
+        if cached is None:
+            with self._stream_guard(stream_id):
+                cached = self._cached_page(stream_id, page)
+                if cached is None:
+                    try:
+                        cached = self._generate(stream_id, feed_type, category, page, limit, context)
+                    except sqlite3.IntegrityError:
+                        cached = self._cached_page(stream_id, page)
+                        if cached is None:
+                            raise
         items, has_more, created_at = cached
         ranked = bool(items) and items[0].get("rating") is not None
         # 缓存页生成后用户可能又屏蔽了 UP / 关键词，返回前重新过滤
         items = self._apply_filters(items, feed_type, set(), exclude_served=False)
-        return {
+        perf.returned(items)
+        if perf.current():
+            perf.current().info["rate_limited_at_end"] = bili.rate_limited
+        result = {
             "items": items,
             "next_cursor": f"{stream_id}:{page + 1}" if has_more else None,
             "has_more": has_more,
@@ -224,8 +275,31 @@ class RecommendationService:
             "model": "ready" if context["model_version"] != "fallback-v03" else "none",
             "model_version": context["model_version"],
             "view_id": context["view_id"],
-            "notice": "rate_limited" if bili.rate_limited else None,
+            "notice": "rate_limited" if bili.rate_limited else "accumulating" if not items and not context["sources_settings"]["classic"] else None,
         }
+        if feed_type == "following":
+            result["following_freshness"] = get_state(f"stream:{stream_id}:page:0:preparation", {"status": "stale", "checked_at": None})
+            if result["following_freshness"]["status"] == "stale" and result["notice"] != "rate_limited":
+                result["notice"] = "following_stale"
+            elif len(items) < limit and result["notice"] is None:
+                result["notice"] = "accumulating"
+        elif not context["sources_settings"]["classic"] and len(items) < limit and result["notice"] is None:
+            result["notice"] = "accumulating"
+        return result
+
+    @contextmanager
+    def _stream_guard(self, stream_id):
+        with self._streams_lock:
+            state = self._stream_locks.setdefault(stream_id, [threading.Lock(), 0])
+            state[1] += 1
+        try:
+            with perf.lock(state[0], "stream_lock"):
+                yield
+        finally:
+            with self._streams_lock:
+                state[1] -= 1
+                if not state[1]:
+                    del self._stream_locks[stream_id]
 
     def _cached_page(self, stream_id, page):
         with connect() as conn:
@@ -238,12 +312,16 @@ class RecommendationService:
         return json.loads(row["items"]), bool(row["has_more"]), row["created_at"]
 
     def _generate(self, stream_id, feed_type, category, page, limit, context):
+        if feed_type == "following" or not context.get("sources_settings", settings())["classic"]:
+            return self._generate_mixed(stream_id, feed_type, category, page, limit, context)
         from backend.services.model_registry import registry
         bundle = registry.load(context["model_version"])
         sources = FEED_SOURCES[feed_type]
         stream_bvids = self._stream_bvids(stream_id)
+        if any(v.get("_detail_complete") is False for v in pool.all(sources)):
+            pool.complete(sources, SOURCE_SYNC_DETAILS)
 
-        ranked = self._rank(feed_type, category, sources, exclude=stream_bvids, exclude_served=True, bundle=bundle)
+        ranked = self._rank(feed_type, category, sources, exclude=stream_bvids, exclude_served=True, bundle=bundle, record_hits=False)
         # 候选不足：同步抓取新候选（每个来源最多一页）
         if len(ranked) < limit:
             for source in sources:
@@ -251,36 +329,256 @@ class RecommendationService:
                     pool.expand(source)
                 except LoginExpired:
                     raise
+            ranked = self._rank(feed_type, category, sources, exclude=stream_bvids, exclude_served=True, bundle=bundle, record_hits=False)
+        with perf.lock(self._gen_lock, "gen_lock"):
+            if context.get("request_stop") and context["request_stop"].is_set():
+                raise FeedError("候选准备已停止，请重新登录或换一批")
+            cached = self._cached_page(stream_id, page)
+            if cached is not None:
+                return cached
+            stream_bvids = self._stream_bvids(stream_id)
             ranked = self._rank(feed_type, category, sources, exclude=stream_bvids, exclude_served=True, bundle=bundle)
-        # 候选真正耗尽：回退使用较早展示过的视频（最久未展示的优先）
-        if len(ranked) < limit:
-            already = {v["bvid"] for v in ranked}
-            fallback = [
-                v for v in self._rank(feed_type, category, sources, exclude=stream_bvids | already, exclude_served=False, bundle=bundle)
-            ]
-            last_served = self._last_served(feed_type)
-            fallback.sort(key=lambda v: last_served.get(v["bvid"], 0))
-            ranked += fallback
+            # 候选真正耗尽：回退使用较早展示过的视频（最久未展示的优先）
+            if len(ranked) < limit:
+                already = {v["bvid"] for v in ranked}
+                fallback = [
+                    v for v in self._rank(feed_type, category, sources, exclude=stream_bvids | already, exclude_served=False, bundle=bundle)
+                ]
+                last_served = self._last_served(feed_type)
+                fallback.sort(key=lambda v: last_served.get(v["bvid"], 0))
+                ranked += fallback
 
-        items = ranked[:limit]
-        if bundle and getattr(bundle, "policy", "base") == "diversity" and feed_type == "for_you" and category == "all":
-            from backend.services.ranking_policy import diversify
-            items = diversify(ranked, limit, self._stream_authors(stream_id))
-        has_more = len(ranked) > limit or not bili.rate_limited
-        if not items:
-            has_more = False
-        for i, item in enumerate(items):
-            item["rank"] = page * limit + i + 1
-        created_at = now()
-        self._record(stream_id, feed_type, category, page, items, has_more, created_at, context)
+            items = ranked[:limit]
+            if bundle and getattr(bundle, "policy", "base") == "diversity" and feed_type == "for_you" and category == "all":
+                from backend.services.ranking_policy import diversify
+                items = diversify(ranked, limit, self._stream_authors(stream_id))
+            has_more = len(ranked) > limit or not bili.rate_limited
+            if not items:
+                has_more = False
+            for i, item in enumerate(items):
+                item["rank"] = page * limit + i + 1
+            created_at = now()
+            self._record(stream_id, feed_type, category, page, items, has_more, created_at, context)
         self.prefetch(feed_type)
         return items, has_more, created_at
 
-    def _rank(self, feed_type, category, sources, exclude, exclude_served, bundle=None):
-        candidates = pool.all(sources)
+    def _generate_mixed(self, stream_id, feed_type, category, page, limit, context):
+        from backend.services.model_registry import registry
+        bundle = registry.load(context["model_version"])
+        options = context["sources_settings"]
+        sources = self._mixed_sources(feed_type, options)
+        if perf.current() and perf.current().deep:
+            for source in sources:
+                pool.all((source,))
+            perf.current().baseline_frozen = True
+        if perf.current():
+            for source in perf.SOURCES:
+                if source not in sources:
+                    perf.current().sources[source]["status"] = "disabled"
+        excluded = self._stream_bvids(stream_id)
+        snapshot = affinity.snapshot()
+        # 先按真实过滤、质量和让位规则成页，普通入口不生产当前页以外的候选。
+        ranked = self.rank_sources([v for source in sources for v in pool.all((source,))], feed_type, category, excluded, bundle, snapshot, record_hits=False)
+        items = self._select_mixed(ranked, feed_type, sources, limit, options)
+        if page == 0 and feed_type == "following":
+            self._prepare_following(stream_id, limit, excluded, context.get("request_stop"))
+        elif page == 0 and category not in ("all", "recent", "discover") and len(items) < limit:
+            self._prepare_category(stream_id, feed_type, category, sources, limit, options, excluded, bundle, context.get("request_stop"))
+        with perf.lock(self._gen_lock, "gen_lock"):
+            if context.get("request_stop") and context["request_stop"].is_set():
+                raise FeedError("候选准备已停止，请重新登录或换一批")
+            cached = self._cached_page(stream_id, page)
+            if cached is not None:
+                return cached
+            excluded = self._stream_bvids(stream_id)
+            ranked = self.rank_sources(self._mixed_candidates(stream_id, feed_type, sources, excluded), feed_type, category, excluded, bundle, affinity.snapshot())
+            items = self._select_mixed(ranked, feed_type, sources, limit, options)
+            remaining = {source: [v for v in videos if v["bvid"] not in {item["bvid"] for item in items}] for source, videos in ranked.items()}
+            has_more = bool(items) and bool(self._select_mixed(remaining, feed_type, sources, limit, options))
+            for i, item in enumerate(items):
+                item["rank"] = page * limit + i + 1
+            created_at = now()
+            self._record(stream_id, feed_type, category, page, items, has_more, created_at, context)
+        self.prefetch(feed_type, context=context, category=category, limit=limit)
+        return items, has_more, created_at
+
+    @staticmethod
+    def _mixed_sources(feed_type, options):
+        sources = ("follow", "related", "up_archive") + tuple(s for s in ("rcmd", "hot") if options[s] != "off") if feed_type == "for_you" else FEED_SOURCES[feed_type]
+        return () if feed_type in ("hot", "explore") and options[sources[0]] == "off" else sources
+
+    def ready_buffer(self, feed_type, category, limit, options, model_version, pages=3):
+        """后台模拟连续页面，按实际 Mixer 结果统计储备，不写命中或曝光。"""
+        from backend.services.model_registry import registry
+        candidates = [v for source in self._mixed_sources(feed_type, options) for v in pool.all((source,))]
+        if feed_type == "following":
+            candidates, _ = filters.filter_candidates(candidates, record=False)
+            candidates.sort(key=lambda v: v.get("pubdate") or 0, reverse=True)
+            candidates = candidates[:next((i for i, v in enumerate(candidates) if v.get("_detail_complete") is not True), len(candidates))]
+        snapshot, excluded, counts = affinity.snapshot(), set(), {}
+        bundle = registry.load(model_version)
+        for page in range(pages):
+            ranked = self.rank_sources(candidates, feed_type, category, excluded, bundle, snapshot, record_hits=False)
+            items = self._select_mixed(ranked, feed_type, self._mixed_sources(feed_type, options), limit, options)
+            for item in items:
+                counts[item["source"]] = counts.get(item["source"], 0) + 1
+            if len(items) < limit:
+                return page, counts
+            excluded.update(v["bvid"] for v in items)
+        return pages, counts
+
+    def _mixed_candidates(self, stream_id, feed_type, sources, excluded):
+        candidates = [v for source in sources for v in pool.all((source,))]
+        if feed_type != "following":
+            return candidates
+        metadata = get_state(f"stream:{stream_id}:page:0:preparation", {})
+        if metadata.get("status") != "checked":
+            return candidates
+        # 只消费本次检查时的时间线，缺详情处不能用更旧视频越过。
+        candidates, _ = filters.filter_candidates([v for v in candidates if v["bvid"] not in excluded and (v.get("pubdate") or 0) <= metadata["checked_at"]], record=False)
+        candidates.sort(key=lambda v: v.get("pubdate") or 0, reverse=True)
+        for index, video in enumerate(candidates):
+            if video.get("_detail_complete") is not True:
+                return candidates[:index]
+        return candidates
+
+    def _prepare_following(self, stream_id, limit, excluded, stop=None):
+        key = f"stream:{stream_id}:page:0:preparation"
+        if get_state(key):
+            return
+        metadata = {"status": "stale", "checked_at": None}
+        try:
+            with requests_scope.scope(total=4, details=3, recalls=1, timeout=5, stop=stop, candidate=True) as request:
+                if bili.rate_limited or not bili.has_cookie:
+                    raise requests_scope.BudgetEnded("rate_limited" if bili.rate_limited else "logged_out")
+                page = bili.follow_feed()
+                requests_scope.check(request, bili.rate_limited, sending=False)
+                pool._save("follow", page["items"])
+                # 只更新成功 head 的刷新时间，不覆盖后台独立维护的游标。
+                with connect() as conn:
+                    conn.execute("INSERT INTO app_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=json_set(app_state.value,'$.last_refresh_at',json_extract(excluded.value,'$.last_refresh_at')),updated_at=excluded.updated_at",
+                                 ("pool:follow", json.dumps({**pool.state("follow"), "last_refresh_at": time.time()}), now()))
+                metadata = {"status": "checked", "checked_at": time.time()}
+                # 先保存成功检查，生成失败后的同 view 重试不再重复访问 head。
+                from backend.storage.database import set_state
+                set_state(key, metadata)
+                tried = set()
+                request["budget"]["details"] = min(3, max(0, limit - len(self._mixed_candidates(stream_id, "following", ("follow",), excluded))))
+                request["budget"]["total"] = min(request["budget"]["total"], request["budget"]["details"])
+                while len(self._mixed_candidates(stream_id, "following", ("follow",), excluded)) < limit:
+                    candidates, _ = filters.filter_candidates([v for v in pool.all(("follow",)) if v["bvid"] not in excluded and (v.get("pubdate") or 0) <= metadata["checked_at"]], record=False)
+                    candidates.sort(key=lambda v: v.get("pubdate") or 0, reverse=True)
+                    pending = next((v for v in candidates if v.get("_detail_complete") is not True), None)
+                    if not pending or pending["bvid"] in tried or (pending["bvid"] not in bili._detail_cache and sum(bvid not in bili._detail_cache for bvid in tried) >= 3):
+                        break
+                    tried.add(pending["bvid"])
+                    pool.complete(("follow",), 1, candidates=[pending], stop=stop)
+        except (BiliError, requests_scope.BudgetEnded) as error:
+            metadata["reason"] = str(getattr(error, "code", error))[:80]
+        from backend.storage.database import set_state
+        set_state(key, metadata)
+
+    def _prepare_category(self, stream_id, feed_type, category, sources, limit, options, excluded, bundle, stop=None):
+        from backend.storage.database import set_state
+        key = f"stream:{stream_id}:page:0:preparation"
+        if get_state(key):
+            return
+        snapshot = affinity.snapshot()
+        tried = set()
+        try:
+            with requests_scope.scope(total=3, details=2, recalls=1, timeout=5, stop=stop, candidate=True) as request:
+                expanded = False
+                while True:
+                    candidates = [v for source in sources for v in pool.all((source,))]
+                    ranked = self.rank_sources(candidates, feed_type, category, excluded, bundle, snapshot, record_hits=False)
+                    items = self._select_mixed(ranked, feed_type, sources, limit, options)
+                    if len(items) >= limit:
+                        break
+                    if not tried:
+                        request["budget"]["details"] = min(request["budget"]["details"], limit - len(items))
+                        request["budget"]["total"] = min(request["budget"]["total"], request["budget"]["details"] + (0 if expanded else 1))
+                    cooled = self._cooled_bvids()
+                    hidden = self._hidden_bvids()
+                    pending, _ = filters.filter_candidates([v for v in candidates if v.get("_detail_complete") is not True and v["bvid"] not in excluded | snapshot["watched"] | tried | hidden and (v["bvid"], v["source"]) not in cooled and (not v.get("tname") or v.get("tname") == category) and (v["source"] != "up_archive" or snapshot["ups"].get(up_key(v), {}).get("regular")) and (v["source"] != "follow" or up_key(v) in snapshot["followings"] and (v.get("pubdate") or 0) >= time.time() - FOLLOW_WINDOW)], record=False)
+                    if not pending:
+                        if expanded or "related" not in sources:
+                            break
+                        pool.expand("related", category=category, details=False, seed_budget=1, stop=stop)
+                        expanded = True
+                        continue
+                    pending = pending[:min(limit - len(items), 2 - sum(bvid not in bili._detail_cache for bvid in tried))]
+                    if not pending:
+                        break
+                    tried.add(pending[0]["bvid"])
+                    pool.complete(sources, 1, candidates=pending[:1], stop=stop)
+        except (BiliError, requests_scope.BudgetEnded):
+            pass
+        set_state(key, {"status": "prepared", "checked_at": time.time()})
+
+    @staticmethod
+    def _select_mixed(ranked, feed_type, sources, limit, options):
+        if feed_type == "following":
+            return mix(ranked, limit, options, following=True)
+        elif feed_type == "for_you":
+            return mix(ranked, limit, options)
+        else:
+            return ([v for v in ranked.get(sources[0], []) if not v.get("downrank")] + [v for v in ranked.get(sources[0], []) if v.get("downrank")][:1])[:limit] if sources else []
+
+    @perf.measured("rank_sources_ms")
+    def rank_sources(self, candidates, feed_type, category, exclude, bundle, snapshot=None, record_hits=True):
+        """线上和盲评共用同一过滤、来源排序与混合口径。"""
+        snapshot = snapshot or affinity.snapshot()
+        candidates = [v for v in candidates if v.get("_detail_complete") is True and v["bvid"] not in exclude]
+        if feed_type == "following":
+            candidates, _ = filters.filter_candidates(candidates, record=record_hits)
+        else:
+            candidates = self._apply_filters(candidates, feed_type, exclude, False, record_hits, dedupe_source=True)
+            cooled = self._cooled_bvids()
+            candidates = [v for v in candidates if v["bvid"] not in snapshot["watched"] and (v["bvid"], v["source"]) not in cooled and
+                          (v["source"] != "follow" or (v.get("pubdate", 0) >= time.time() - FOLLOW_WINDOW and up_key(v) in snapshot["followings"]))]
+            candidates = affinity.quality_gate(candidates, snapshot)
+            candidates = self._apply_category(candidates, category, bundle)
+        result = {}
+        for source in {v["source"] for v in candidates}:
+            videos = [v for v in candidates if v["source"] == source]
+            if source == "up_archive":
+                videos = [v for v in videos if snapshot["ups"].get(up_key(v), {}).get("regular")]
+                videos.sort(key=lambda v: (v.get("archive_order") != "click", -(v.get("view") or 0) if v.get("archive_order") == "click" else -(v.get("pubdate") or 0)))
+            elif source == "follow":
+                videos.sort(key=lambda v: v.get("pubdate") or 0, reverse=True)
+            with perf.span("rank_ms", source):
+                scored = bundle.score(videos) if bundle and feed_type != "following" else []
+                scored.sort(key=lambda v: v[1], reverse=True)
+                scored_ids = {v[0]["bvid"] for v in scored}
+                result[source] = [self._item(v, rating, tags) for v, rating, tags in scored] + [self._item(v, None, []) for v in videos if v["bvid"] not in scored_ids]
+                result[source].sort(key=lambda v: bool(v.get("downrank")))
+        return result
+
+    @perf.measured("cooldown_ms")
+    def _cooled_bvids(self):
+        with connect() as conn:
+            rows = conn.execute("SELECT r.bvid,r.source,r.served_at,r.clicked FROM recommendation_history r JOIN served_videos s ON s.bvid=r.bvid AND s.feed_type=r.feed_type WHERE r.feed_type!='following' AND r.source IS NOT NULL ORDER BY r.served_at,r.id").fetchall()
+        streaks = {}
+        for row in rows:
+            key = (row["bvid"], row["source"])
+            count, last = streaks.get(key, (0, 0))
+            if row["source"] in ("up_archive", "related") and row["served_at"] - last >= 30 * 86400:
+                count = 0
+            streaks[key] = (0 if row["clicked"] else count + 1, row["served_at"])
+        return {key for key, (count, last) in streaks.items() if
+                (key[1] in ("follow", "hot", "rcmd") and (last > time.time() - SERVED_WINDOW or count >= 2)) or
+                (key[1] in ("up_archive", "related") and count >= 2 and last > time.time() - 30 * 86400)}
+
+    @staticmethod
+    def _source_reason(video):
+        return {"follow": "来自关注 UP 的新作", "up_archive": "来自常看 UP 的旧作", "related": "与你喜欢的视频相关", "rcmd": "来自 B 站推荐流", "hot": "来自热门榜"}.get(video.get("source"), "")
+
+    @perf.measured("rank_ms")
+    def _rank(self, feed_type, category, sources, exclude, exclude_served, bundle=None, record_hits=True):
+        candidates = [v for v in pool.all(sources) if v.get("_detail_complete") is not False]
         # 候选真正参与 Feed 生成时才记命中，避免预取预判污染计数
         candidates = self._apply_filters(
-            candidates, feed_type, exclude, exclude_served, record_hits=True
+            candidates, feed_type, exclude, exclude_served, record_hits=record_hits
         )
         candidates = self._apply_category(candidates, category, bundle)
 
@@ -307,21 +605,22 @@ class RecommendationService:
             return mixed
         return ranked + unknown
 
-    def _apply_filters(self, candidates, feed_type, exclude, exclude_served, record_hits=False):
+    def _apply_filters(self, candidates, feed_type, exclude, exclude_served, record_hits=False, dedupe_source=False):
         """统一过滤入口：精确 MID → UP 关键词 → 标题关键词，全部由 filter_service 负责。
 
         v0.2.1 起过滤规则来自 filter_rules，不再直接读 blocked_keywords。
         """
-        hidden = self._hidden_bvids()
+        hidden = self._hidden_bvids() if feed_type != "following" else set()
         served = self._served_recent(feed_type) if exclude_served else set()
 
         stage = []
         seen = set()
         for v in candidates:
             bvid = v["bvid"]
-            if bvid in seen or bvid in exclude or bvid in served or bvid in hidden:
+            key = (bvid, v.get("source")) if dedupe_source else bvid
+            if key in seen or bvid in exclude or bvid in served or bvid in hidden:
                 continue
-            seen.add(bvid)
+            seen.add(key)
             stage.append(v)
 
         kept, _stats = filters.filter_candidates(stage, record=record_hits)
@@ -331,9 +630,7 @@ class RecommendationService:
         if not category or category == "all":
             return candidates
         if category == "recent":
-            from backend.recommender.recommender import read_history
-
-            history = sorted(read_history(), key=lambda h: h.get("view_at", 0), reverse=True)[:15]
+            history = sorted(affinity.history(), key=lambda h: h.get("view_at", 0) or h.get("observed_at", 0), reverse=True)[:15]
             recent_tags = {t for h in history for t in (h.get("tag") or [])}
             recent_authors = {h.get("author") for h in history}
             return [v for v in candidates if recent_tags & set(v.get("tag") or []) or v.get("author") in recent_authors]
@@ -362,12 +659,18 @@ class RecommendationService:
             "tags": (video.get("tag") or [])[:10],
             "source": video.get("source", ""),
             "rcmd_reason": video.get("rcmd_reason", ""),
+            "source_reason": RecommendationService._source_reason(video),
+            "seed_bvid": video.get("seed_bvid"),
+            "seed_title": video.get("seed_title"),
+            "downrank": video.get("downrank", False),
+            "stranger": video.get("stranger", False),
             "rating": rating,
             "matched_tags": matched_tags[:5],
         }
 
     # ---------------- 记录 ----------------
 
+    @perf.measured("record_ms")
     def _record(self, stream_id, feed_type, category, page, items, has_more, created_at, context):
         from backend.services.evaluation_service import evaluation
         predictions = evaluation.predict([v["_snapshot"] for v in items])
@@ -375,12 +678,13 @@ class RecommendationService:
             for item in items:
                 snapshot = item.pop("_snapshot")
                 conn.execute("INSERT INTO served_videos(bvid,feed_type,first_served_at,last_served_at,times) VALUES(?,?,?,?,1) ON CONFLICT(bvid,feed_type) DO UPDATE SET last_served_at=excluded.last_served_at,times=times+1", (item["bvid"],feed_type,created_at,created_at))
-                result = conn.execute("INSERT INTO recommendation_history(bvid,feed_type,title,author,pic,rating,rank,model_version,served_at,stream_id,page,view_id,experiment_id,arm,video_snapshot,predictions) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                                     (item["bvid"],feed_type,item["title"],item["author"],item["pic"],item["rating"],item["rank"],context["model_version"],created_at,stream_id,page,context["view_id"],context["experiment_id"],context["arm"],json.dumps(snapshot,ensure_ascii=False),json.dumps(predictions.get(item["bvid"],{}))))
+                result = conn.execute("INSERT INTO recommendation_history(bvid,feed_type,title,author,pic,rating,rank,model_version,served_at,stream_id,page,view_id,experiment_id,arm,video_snapshot,predictions,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                     (item["bvid"],feed_type,item["title"],item["author"],item["pic"],item["rating"],item["rank"],context["model_version"],created_at,stream_id,page,context["view_id"],context["experiment_id"],context["arm"],json.dumps(snapshot,ensure_ascii=False),json.dumps(predictions.get(item["bvid"],{})),item.get("source")))
                 item.update(recommendation_id=result.lastrowid, view_id=context["view_id"], model_version=context["model_version"])
             conn.execute("INSERT INTO feed_cache(stream_id,feed_type,category,page,items,has_more,created_at,model_version,page_limit,view_id,experiment_id,arm) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                          (stream_id,feed_type,category,page,json.dumps(items,ensure_ascii=False),int(has_more),created_at,context["model_version"],context["page_limit"],context["view_id"],context["experiment_id"],context["arm"]))
             conn.execute("DELETE FROM feed_cache WHERE created_at<?", (created_at-3*86400,))
+            conn.execute("DELETE FROM app_state WHERE key LIKE 'stream:%:page:%:preparation' AND updated_at<?", (created_at-3*86400,))
 
     def _stream_bvids(self, stream_id):
         with connect() as conn:
@@ -446,6 +750,7 @@ class RecommendationService:
         if key in self._prefetching:
             return
 
+        @requests_scope.background
         def run():
             try:
                 fn()
