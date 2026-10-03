@@ -87,6 +87,14 @@ body {
   outline-offset: 3px;
 }
 
+/* 搜索框由外层统一显示焦点，避免输入框叠加矩形轮廓。 */
+.header-search input:focus-visible {
+  outline: none;
+}
+.header-search button:focus-visible {
+  outline-offset: -4px;
+}
+
 button:not(:disabled), a {
   cursor: pointer;
 }

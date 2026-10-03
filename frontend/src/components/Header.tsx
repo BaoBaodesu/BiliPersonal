@@ -54,6 +54,7 @@ export function Header() {
     e.preventDefault()
     const v = q.trim()
     if (!v) return
+    window.scrollTo({ top: 0, behavior: 'instant' })
     navigate(`/search?q=${encodeURIComponent(v)}`, { viewTransition: true })
     input.current?.blur()
     setMobileSearch(false)
@@ -63,23 +64,24 @@ export function Header() {
     if (onFeed) {
       window.dispatchEvent(new CustomEvent('feed:refresh'))
     } else {
+      window.scrollTo({ top: 0, behavior: 'instant' })
       qc.invalidateQueries()
     }
   }
 
   const searchForm = (
-    <form onSubmit={submit} role="search" className="flex w-full max-w-[640px] items-center">
-      <div className="flex h-11 min-w-0 flex-1 items-center rounded-l-full border border-line bg-bg pl-4 focus-within:border-accent">
+    <form onSubmit={submit} role="search" className="header-search flex h-11 w-full max-w-[640px] items-center rounded-full border border-line bg-bg focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/15">
+      <div className="flex h-full min-w-0 flex-1 items-center gap-1 pl-4 pr-1">
         <input
           ref={input}
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="搜索"
           aria-label="搜索"
-          className="h-full w-full bg-transparent text-base text-fg outline-none placeholder:text-subtle"
+          className="h-full min-w-0 w-full bg-transparent text-base text-fg outline-none placeholder:text-subtle"
         />
         {q && (
-          <button type="button" aria-label="清除" onClick={() => { setQ(''); input.current?.focus() }} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full hover:bg-surface-hover">
+          <button type="button" aria-label="清除" onClick={() => { setQ(''); input.current?.focus() }} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-muted hover:bg-surface-hover hover:text-fg">
             <X size={18} />
           </button>
         )}
@@ -87,7 +89,7 @@ export function Header() {
       <button
         type="submit"
         aria-label="搜索"
-        className="flex h-11 w-14 shrink-0 items-center justify-center rounded-r-full border border-l-0 border-line bg-surface hover:bg-surface-hover sm:w-16"
+        className="flex h-full w-14 shrink-0 items-center justify-center rounded-r-full border-l border-line bg-surface hover:bg-surface-hover sm:w-16"
       >
         <Search size={20} />
       </button>

@@ -51,12 +51,13 @@ export function useRefreshFeed(type: FeedType, category: string, viewId?: string
   return useMutation({
     mutationKey: ['refresh-feed'],
     mutationFn: () => api.feed.refresh(type, category),
+    onMutate: () => window.scrollTo({ top: 0, behavior: 'instant' }),
     onSuccess: (page) => {
       qc.setQueryData<InfiniteData<FeedPage, string | null>>(keys.feed(type, category, viewId), {
         pages: [page],
         pageParams: [null],
       })
-      window.scrollTo({ top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })
+      window.scrollTo({ top: 0, behavior: 'instant' })
     },
     onError: () => useToast.getState().show('换批失败，已保留当前推荐，请稍后重试'),
   })
