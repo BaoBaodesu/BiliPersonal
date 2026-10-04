@@ -36,8 +36,14 @@ export function useFeed(type: FeedType, category: string, viewId?: string) {
   const qc = useQueryClient()
   return useInfiniteQuery({
     queryKey: keys.feed(type, category, viewId),
-    queryFn: ({ pageParam }) => api.feed.get(type, category, pageParam, 12,
-      qc.getQueryData<InfiniteData<FeedPage>>(keys.feed(type, category, viewId))?.pages[0]?.view_id ?? viewId),
+    queryFn: async ({ pageParam, signal }) => {
+      const page = await api.feed.get(type, category, pageParam, 12,
+      qc.getQueryData<InfiniteData<FeedPage>>(keys.feed(type, category, viewId))?.pages[0]?.view_id ?? viewId, signal)
+      if (signal.aborted) throw new DOMException("已取消旧分页", "AbortError")
+      const current = qc.getQueryData<InfiniteData<FeedPage>>(keys.feed(type, category, viewId))?.pages[0]
+      if (pageParam && current && current.view_id !== page.view_id) throw new DOMException("批次已更换", "AbortError")
+      return page
+    },
     initialPageParam: null as string | null,
     getNextPageParam: (last) => (last.has_more ? last.next_cursor : undefined),
     staleTime: Infinity,
@@ -51,7 +57,10 @@ export function useRefreshFeed(type: FeedType, category: string, viewId?: string
   return useMutation({
     mutationKey: ['refresh-feed'],
     mutationFn: () => api.feed.refresh(type, category),
-    onMutate: () => window.scrollTo({ top: 0, behavior: 'instant' }),
+    onMutate: async () => {
+      await qc.cancelQueries({ queryKey: keys.feed(type, category, viewId), exact: true })
+      window.scrollTo({ top: 0, behavior: 'instant' })
+    },
     onSuccess: (page) => {
       qc.setQueryData<InfiniteData<FeedPage, string | null>>(keys.feed(type, category, viewId), {
         pages: [page],

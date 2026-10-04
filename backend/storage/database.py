@@ -27,6 +27,10 @@ def connect():
 
 
 def init_db():
+    if os.path.isfile(DB_PATH):
+        with connect() as conn:
+            if "source" in {r[1] for r in conn.execute("PRAGMA table_info(candidates)")}:
+                raise RuntimeError("请先停止服务并执行 python -m backend.tools.candidate_migration upgrade；该命令先备份和副本演练")
     os.makedirs(DATA_DIR, exist_ok=True)
     with connect() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
@@ -35,6 +39,8 @@ def init_db():
         migrate(conn)
         from backend.storage.migrate_v031 import migrate
         migrate(conn)
+        from backend.storage.migrate_v032 import upgrade
+        upgrade(conn)
 
 
 def now():

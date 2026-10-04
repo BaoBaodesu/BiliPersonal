@@ -136,7 +136,7 @@ class BilibiliService:
 
     def _before_send(self, url=None, delay=0):
         """初发、重试和重定向共用发送准入；超预算不产生网络请求。"""
-        value = requests_scope.current()
+        value = {**requests_scope.current(), "url": url or requests_scope.current().get("url", "")}
         ticket = {"scope": value, "eligible": time.perf_counter() + delay, "identity": object()}
         with perf.span("request_queue_wait_ms"):
             busy = self._lock.locked()
@@ -430,10 +430,20 @@ class BilibiliService:
 
     def followings(self, pn=1, ps=50):
         data = self.get("https://api.bilibili.com/x/relation/followings", {"vmid": self.nav()["mid"], "pn": pn, "ps": ps})
-        return {"items": [{"mid": v["mid"], "name": v.get("uname", "")} for v in data.get("list") or []],
+        if not isinstance(data, dict) or "total" not in data or not isinstance(data.get("list") or [], list):
+            raise BiliError(-1, "关注响应不完整")
+        return {"items": [{"mid": v["mid"], "name": v.get("uname", ""), "special": bool(v["special"]) if "special" in v else (True if -10 in (v.get("tag") or []) else None)} for v in data.get("list") or []],
                 "has_more": pn * ps < data.get("total", 0)}
 
+    def special_followings(self):
+        data = self.get("https://api.bilibili.com/x/relation/tag/special")
+        items = data if isinstance(data, list) else data.get("list") if isinstance(data, dict) else None
+        if not isinstance(items, list) or any(not isinstance(v, dict) or not v.get("mid") for v in items):
+            raise BiliError(-1, "特别关注响应不完整")
+        return {str(v["mid"]) for v in items}
+
     def follow_feed(self, offset=""):
+
         data = self.get("https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/all", {"type": "video", "offset": offset})
         videos = []
         for item in data.get("items") or []:

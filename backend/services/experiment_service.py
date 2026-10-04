@@ -51,6 +51,9 @@ def product_report(rows):
 
 class ExperimentService:
     def start(self, blind_report=None, automatic=False):
+        from backend.storage.database import get_state
+        if get_state("policy:trial", {}).get("status") in ("running", "kept"):
+            raise ValueError("已有策略试用，不能启动模型试用")
         state = registry.state()
         pair = state.get("evaluation")
         if not pair or state.get("trial"):
@@ -104,6 +107,9 @@ class ExperimentService:
         trial, pair = state.get("trial"), state.get("evaluation")
         if not trial or trial["status"] != "running":
             if state.get("anchor") and pair and pair["status"] == "passed" and not state.get("auto_paused"):
+                from backend.storage.database import get_state
+                if get_state("policy:trial", {}).get("status") in ("running", "kept"):
+                    return None
                 return self.start(automatic=True)
             return None
         if pair and pair["status"] == "rejected":

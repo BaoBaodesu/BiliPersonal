@@ -95,6 +95,53 @@ body {
   outline-offset: -4px;
 }
 
+/* 滑杆保留原生键盘和触摸操作，焦点只柔和地标记圆形滑块。 */
+.discrete-slider {
+  appearance: none;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.discrete-slider:focus-visible {
+  outline: none;
+}
+.discrete-slider::-webkit-slider-runnable-track {
+  height: 24px;
+  border-radius: 999px;
+  background: transparent;
+}
+.discrete-slider::-moz-range-track {
+  height: 24px;
+  border-radius: 999px;
+  background: transparent;
+}
+.discrete-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 32px;
+  height: 32px;
+  margin-top: -4px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 12%);
+}
+.discrete-slider::-moz-range-thumb {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 12%);
+}
+.discrete-slider:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.discrete-slider:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
 button:not(:disabled), a {
   cursor: pointer;
 }

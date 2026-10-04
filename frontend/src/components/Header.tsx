@@ -1,8 +1,9 @@
+import { api } from '../api/client'
 import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, Menu, RefreshCw, Search, X } from 'lucide-react'
 import { useIsMutating, useQueryClient } from '@tanstack/react-query'
-import { useUi } from '../stores/ui'
+import { useUi, useToast } from '../stores/ui'
 import { ModelStatus } from './ModelStatus'
 import { UserAvatar } from './UserAvatar'
 import { Logo } from './Logo'
@@ -54,6 +55,7 @@ export function Header() {
     e.preventDefault()
     const v = q.trim()
     if (!v) return
+    void api.user.recordSearch(v, crypto.randomUUID()).catch(() => useToast.getState().show('搜索记忆保存失败，搜索仍可继续'))
     window.scrollTo({ top: 0, behavior: 'instant' })
     navigate(`/search?q=${encodeURIComponent(v)}`, { viewTransition: true })
     input.current?.blur()

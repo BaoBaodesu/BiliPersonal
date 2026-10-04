@@ -13,13 +13,13 @@ export function SearchPage() {
   const q = params.get('q') || ''
   const query = useInfiniteQuery({
     queryKey: ['search', q],
-    queryFn: ({ pageParam }) => api.search(q, pageParam),
+    queryFn: ({ pageParam, signal }) => api.search(q, pageParam, signal),
     initialPageParam: 1,
     getNextPageParam: (last) => (last.page < last.num_pages ? last.page + 1 : undefined),
     enabled: !!q,
     staleTime: 5 * 60_000,
   })
-  const items = query.data?.pages.flatMap((p) => p.items) ?? []
+  const items = (query.data?.pages.flatMap((p) => p.items) ?? []).filter((v, index, all) => all.findIndex((item) => item.bvid === v.bvid) === index)
 
   useEffect(() => {
     document.title = `${q} - 搜索 - BiliPersonal`

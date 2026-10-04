@@ -17,6 +17,12 @@ from backend.services import feed_performance as perf
 
 
 def create_app(start_background=True):
+    from backend.services.source_scheduler import scheduler
+    scheduler.resume_session()
+    training.resume_session()
+    scheduler.enabled = start_background
+    training.enabled = start_background
+    recommendation.background_enabled = start_background
     init_db()
     app = Flask(__name__, static_folder=None)
     app.json.ensure_ascii = False

@@ -1,3 +1,5 @@
+import { PolicyControls } from '../components/PolicyControls'
+import { DiscreteSlider } from '../components/DiscreteSlider'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Monitor, Moon, Sun, RotateCw } from 'lucide-react'
@@ -118,16 +120,10 @@ export function SettingsPage() {
           <button onClick={() => sources.refetch()} className="min-h-11 text-sm text-accent">读取失败，点击重试</button>
         ) : sources.data && (
           <div className="space-y-3">
-            {([['hot', '热门榜'], ['rcmd', 'B 站推荐流']] as const).map(([key, label]) => (
-              <label key={key} className="flex min-h-11 items-center justify-between gap-4 text-sm">
-                {label}
-                <select value={sources.data.settings[key]} disabled={saveSources.isPending} onChange={(e) => saveSources.mutate({ [key]: e.target.value as SourceLevel })} className="h-11 rounded-lg border border-line bg-bg px-3 disabled:opacity-50">
-                  <option value="off">关闭</option>
-                  <option value="fallback">仅兜底</option>
-                  <option value="small">少量（每页 1 条）</option>
-                  <option value="standard">标准（每页 3 条）</option>
-                </select>
-              </label>
+            {([['hot', '热门榜'], ['rcmd', 'B 站推荐流'], ['vertical_search', '兴趣垂类搜索']] as const).map(([key, label]) => (
+              <DiscreteSlider key={key} label={label} value={(['off', 'fallback', 'small', 'standard'] as SourceLevel[]).indexOf(sources.data.settings[key])}
+                labels={['关闭', '仅兜底', '少量1条', '标准3条']} disabled={saveSources.isPending}
+                onCommit={(index) => saveSources.mutateAsync({ [key]: (['off', 'fallback', 'small', 'standard'] as SourceLevel[])[index] })} />
             ))}
             <Toggle checked={sources.data.settings.classic} onChange={(classic) => saveSources.mutate({ classic })} disabled={saveSources.isPending} label="经典首页" hint="使用原来的热门与推荐流排序路径" />
             <p className="text-xs text-muted" role="status">{saveSources.isPending ? '正在保存…' : '修改后从下一次换一批开始生效；当前批次保持原设置。'}</p>
@@ -139,8 +135,8 @@ export function SettingsPage() {
                   <p className="mb-3 text-xs text-muted">共 {sources.data.report.total} 条；热门 + 推荐流占比 {(sources.data.report.sources.filter((s) => s.source === 'hot' || s.source === 'rcmd').reduce((sum, s) => sum + s.share, 0) * 100).toFixed(1)}%</p>
                   <div className="overflow-x-auto">
                     <table className="w-full text-left text-xs tabular-nums">
-                      <thead><tr className="text-muted"><th className="py-2 font-normal">来源</th><th className="py-2 font-normal">占比</th><th className="py-2 font-normal">点击率</th><th className="py-2 font-normal">不感兴趣率</th></tr></thead>
-                      <tbody>{sources.data.report.sources.map((s) => <tr key={s.source} className="border-t border-line"><td className="py-3">{{ follow: '关注新作', related: '相关视频', up_archive: '常看旧作', rcmd: '推荐流', hot: '热门', legacy: '旧记录' }[s.source] || s.source}</td><td>{(s.share * 100).toFixed(1)}%</td><td>{s.click_rate == null ? '—' : `${(s.click_rate * 100).toFixed(1)}%`}</td><td>{s.not_interested_rate == null ? '—' : `${(s.not_interested_rate * 100).toFixed(1)}%`}</td></tr>)}</tbody>
+                      <thead><tr className="text-muted"><th className="py-2 font-normal">来源</th><th className="py-2 font-normal">生成／曝光</th><th className="py-2 font-normal">占比</th><th className="py-2 font-normal">点击率</th><th className="py-2 font-normal">不感兴趣率</th><th className="py-2 font-normal">屏蔽率</th></tr></thead>
+                      <tbody>{sources.data.report.sources.map((s) => <tr key={s.source} className="border-t border-line"><td className="py-3">{{ follow: '关注新作', related: '相关视频', up_archive: '常看旧作', rcmd: '推荐流', hot: '热门', legacy: '旧记录' }[s.source] || s.source}</td><td>{s.served}／{s.exposed}</td><td>{(s.share * 100).toFixed(1)}%</td><td>{s.click_rate == null ? '—' : `${(s.click_rate * 100).toFixed(1)}%`}</td><td>{s.not_interested_rate == null ? '—' : `${(s.not_interested_rate * 100).toFixed(1)}%`}</td><td>{s.blocked_rate == null ? '—' : `${(s.blocked_rate * 100).toFixed(1)}%`}</td></tr>)}</tbody>
                     </table>
                   </div>
                   <p className="mt-2 text-xs text-muted">占比按生成条目计算；点击率与不感兴趣率按实际曝光计算。没有曝光时显示 —。</p>
@@ -151,6 +147,7 @@ export function SettingsPage() {
         )}
       </Section>
 
+      <Section title="推荐策略"><PolicyControls /></Section>
       <Section title="推荐模型">
         <dl className="grid grid-cols-[8rem_1fr] gap-y-2 text-sm">
           <dt className="text-muted">状态</dt>

@@ -54,7 +54,11 @@ def interests():
         peak = items[0][1] if items else 1
         return [{"name": k, "weight": round(v, 2), "score": round(v / peak * 100)} for k, v in items if k]
 
+    from backend.services.interest_profile import snapshot
+    from backend.services.interest_analysis import report
     return jsonify({
+        "dual_profile": snapshot(),
+        "analysis": report(int(request.args.get("days", 7))),
         "samples": len(history),
         "favorites": sum(1 for h in history if h.get("isfaved")),
         "top_tags": top(tag_weight, 30),
@@ -124,3 +128,49 @@ def image_proxy():
         headers={"Cache-Control": "public, max-age=86400", "Expires": time.strftime(
             "%a, %d %b %Y %H:%M:%S GMT", time.gmtime(time.time() + 86400))},
     )
+
+
+@bp.route("/user/interest-settings", methods=["GET", "PUT"])
+@api
+@login_required
+def interest_settings():
+    from backend.services import interest_profile as profile
+    try:
+        return jsonify(profile.settings() if request.method == "GET" else profile.update_settings(request.get_json(silent=True)))
+    except ValueError as exception:
+        return error("bad_request", str(exception), 400)
+
+
+@bp.put("/user/video-preferences/<bvid>")
+@api
+@login_required
+def video_preferences(bvid):
+    from backend.services.interest_profile import set_preference
+    try:
+        return jsonify(set_preference(bvid, request.get_json(silent=True)))
+    except ValueError as exception:
+        return error("bad_request", str(exception), 400)
+
+
+@bp.route("/user/search-history", methods=["GET", "POST", "DELETE"])
+@api
+@login_required
+def search_history():
+    from backend.services import interest_profile as profile
+    body = request.get_json(silent=True) or {}
+    try:
+        if request.method == "POST":
+            return jsonify({"recorded": profile.record_search(body.get("query"), body.get("event_id"))})
+        if request.method == "DELETE":
+            profile.delete_search(request.args.get("event_id"))
+        return jsonify({"items": profile.search_history(), "enabled": profile.settings()["search_memory"]})
+    except ValueError as exception:
+        return error("bad_request", str(exception), 400)
+
+
+@bp.get("/user/video-preferences")
+@api
+@login_required
+def all_video_preferences():
+    from backend.services.interest_profile import preferences
+    return jsonify(preferences())

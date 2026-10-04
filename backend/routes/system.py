@@ -68,3 +68,19 @@ def set_sources():
     except ValueError as exception:
         return error("bad_request", str(exception), 400)
     return jsonify({"settings": value, "report": source_report()})
+
+
+@bp.route("/recommendation-settings", methods=["GET", "PUT"])
+@api
+@login_required
+def recommendation_settings():
+    from backend.services.recommendation_policy import settings, update_settings
+    return jsonify(settings() if request.method == "GET" else update_settings(request.get_json(silent=True)))
+
+
+@bp.route("/policy-trial", methods=["GET", "POST"])
+@api
+@login_required
+def policy_trial():
+    from backend.services.recommendation_policy import trial_status, trial_action
+    return jsonify(trial_status() if request.method == "GET" else trial_action((request.get_json(silent=True) or {}).get("action")))

@@ -85,7 +85,7 @@ function FullNav({ onNavigate }: { onNavigate?: () => void }) {
         </div>
       ))}
       <p className="px-3 pt-2 text-xs leading-5 text-subtle">
-        BiliPersonal v0.3.1 · 本地个性化推荐客户端
+        BiliPersonal v0.3.2 · 本地个性化推荐客户端
         <br />
         仅用于学习与测试
       </p>

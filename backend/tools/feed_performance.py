@@ -151,6 +151,13 @@ def real(output, count):
         target = str(Path(root) / "snapshot.db")
         with closing(sqlite3.connect(Path(DB_PATH).as_uri() + "?mode=ro", uri=True)) as source, closing(sqlite3.connect(target)) as dest:
             source.backup(dest)
+        with closing(sqlite3.connect(target)) as migration:
+            migration.row_factory = sqlite3.Row
+            from backend.storage.migrate_v032 import upgrade
+            upgrade(migration)
+            from backend.storage.migrate_v031 import migrate
+            migrate(migration)
+            migration.commit()
         patches.enter_context(patch.object(db, "DB_PATH", target))
         patches.enter_context(patch.object(fs, "DB_PATH", target))
         patches.enter_context(patch.object(rs.recommendation, "prefetch"))
@@ -180,7 +187,7 @@ def real(output, count):
         summarize(records, output)
 
 
-def benchmark(output, repeats):
+def benchmark(output, repeats, policy=False):
     """同快照 HTTP 热缓存验收；临时副本恢复在计时外，禁止外部请求。"""
     from backend.app import create_app
     from backend.services.source_mixer import update_settings
@@ -190,6 +197,13 @@ def benchmark(output, repeats):
         target = str(Path(root) / "snapshot.db")
         with closing(sqlite3.connect(Path(DB_PATH).as_uri() + "?mode=ro", uri=True)) as source, closing(sqlite3.connect(target)) as dest:
             source.backup(dest)
+        with closing(sqlite3.connect(target)) as migration:
+            migration.row_factory = sqlite3.Row
+            from backend.storage.migrate_v032 import upgrade
+            upgrade(migration)
+            from backend.storage.migrate_v031 import migrate
+            migrate(migration)
+            migration.commit()
         patches.enter_context(patch.object(db, "DB_PATH", target))
         patches.enter_context(patch.object(fs, "DB_PATH", target))
         patches.enter_context(patch.object(rs.recommendation, "prefetch"))
@@ -199,6 +213,11 @@ def benchmark(output, repeats):
         update_settings({"hot": "fallback", "rcmd": "small", "classic": False})
         fs.filters.invalidate()
         registry.load(state.get("active") or "fallback-v03")
+        if policy:
+            from backend.services.interest_profile import publish
+            from backend.services.recommendation_policy import signature, settings as policy_settings
+            publish()
+            db.set_state("policy:trial", {"status": "running", "signature": signature(policy_settings()), "model_version": state.get("active") or "fallback-v03", "started_at": time.time()})
         app = create_app(start_background=False)
         client = app.test_client()
         baseline = sqlite3.connect(":memory:")
@@ -284,6 +303,7 @@ def lock_probe(output):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--policy", action="store_true", help="仅在性能副本启用新策略")
     parser.add_argument("--real", action="store_true")
     parser.add_argument("--cache-only", action="store_true", help="仅在真实数据库副本上验证缓存成页，不发外部请求")
     parser.add_argument("--lock-probe", action="store_true", help="使用假 HTTP 验证后台节流槽与前台竞争")
@@ -297,7 +317,7 @@ if __name__ == "__main__":
     if args.benchmark:
         if args.repeats < 50:
             parser.error("性能验收每组样本至少 50")
-        benchmark(args.output, args.repeats)
+        benchmark(args.output, args.repeats, args.policy)
     elif args.lock_probe:
         lock_probe(args.output)
     elif args.real or args.cache_only:

@@ -72,7 +72,7 @@ def build_samples(cutoff=None):
                               (cutoff,)).fetchall()
         feedback = conn.execute("SELECT * FROM feedback WHERE created_at <= ? AND (revoked_at IS NULL OR revoked_at>?) ORDER BY created_at,id",
                                 (cutoff, cutoff)).fetchall()
-        candidates = {r["bvid"]: json.loads(r["data"]) for r in conn.execute("SELECT bvid,data FROM candidates WHERE last_refresh_at<=?", (cutoff,))}
+        candidates = {r["bvid"]: json.loads(r["data"]) for r in conn.execute("SELECT bvid,data FROM candidates WHERE updated_at<=?", (cutoff,))}
     videos, actions, action_times = {}, {}, {}
     for event in events:
         video = json.loads(event["video"])

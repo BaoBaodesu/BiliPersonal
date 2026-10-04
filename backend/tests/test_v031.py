@@ -64,7 +64,7 @@ class V031Test(unittest.TestCase):
 
     def following(self, mid):
         with db.connect() as conn:
-            conn.execute("INSERT OR REPLACE INTO followings VALUES(?, 'UP', ?)", (mid, time.time()))
+            conn.execute("INSERT OR REPLACE INTO followings(mid,name,synced_at) VALUES(?, 'UP', ?)", (mid, time.time()))
 
     def save(self, videos):
         for source in {v["source"] for v in videos}:
@@ -79,7 +79,7 @@ class V031Test(unittest.TestCase):
 
     def test_default_quota_and_native_share(self):
         items = mix(self.pools())
-        self.assertEqual({s: sum(v["source"] == s for v in items) for s in SOURCES}, {"hot": 0, "rcmd": 1, "follow": 4, "up_archive": 3, "related": 4})
+        self.assertEqual({s: sum(v["source"] == s for v in items) for s in SOURCES}, {"hot": 0, "rcmd": 1, "follow": 4, "up_archive": 3, "related": 4, "vertical_search": 0})
         self.assertLessEqual(sum(v["source"] in ("hot", "rcmd") for v in items) / len(items), .15)
 
     def test_all_level_combinations_and_largest_remainder(self):
@@ -191,10 +191,10 @@ class V031Test(unittest.TestCase):
 
     def test_related_two_misses_30_day_reset(self):
         clock = time.time()
+        self.position("BV1", served_at=clock-62*86400)
         self.position("BV1", served_at=clock-31*86400)
-        self.position("BV1", served_at=clock-30*86400-1)
         self.assertNotIn(("BV1", "related"), rs.recommendation._cooled_bvids())
-        self.position("BV1", served_at=clock)
+        self.position("BV1", served_at=clock-1801)
         self.assertNotIn(("BV1", "related"), rs.recommendation._cooled_bvids())
         self.position("BV1", served_at=clock+1)
         self.assertIn(("BV1", "related"), rs.recommendation._cooled_bvids())
@@ -371,7 +371,7 @@ class V031Test(unittest.TestCase):
         capture()
         document = json.loads((registry.root / "blind" / "capture" / "private.json").read_text(encoding="utf-8"))
         batch = document["batches"][0]
-        self.assertEqual({v["source"] for v in batch["candidates"]}, set(SOURCES))
+        self.assertEqual({v["source"] for v in batch["candidates"]}, set(SOURCES)-{"vertical_search"})
         self.assertEqual(len(set(batch["positions"]["new"])), 10)
         self.assertEqual(len({v["bvid"] for v in batch["videos"]}), len(batch["videos"]))
         with self.assertRaises(ValueError):

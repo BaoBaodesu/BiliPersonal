@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 
-SOURCES = ("follow", "up_archive", "related", "rcmd", "hot")
+SOURCES = ("follow", "up_archive", "related", "rcmd", "hot", "vertical_search")
 _current = ContextVar("feed_performance", default=None)
 _write_lock = threading.Lock()
 _metrics = ("rank_ms", "rank_prepare_ms", "mixer_ms", "SQLite_ms", "model_load_ms", "affinity_ms",

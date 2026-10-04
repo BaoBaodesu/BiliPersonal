@@ -61,7 +61,7 @@ def categories():
 @login_required
 def explain(bvid):
     try:
-        return jsonify(recommendation.explain(bvid))
+        return jsonify(recommendation.explain(bvid, request.args.get("recommendation_id", type=int)))
     except FeedError as e:
         return error("not_found", str(e), 404)
 
@@ -87,4 +87,5 @@ def search():
     result = bili.search(q, int(request.args.get("page", 1)))
     # 搜索结果同样应用统一过滤规则（不应用 served 去重）；命中计入规则的 hit_count
     result["items"], _stats = filters.filter_candidates(result["items"], record=True)
+    result["items"] = list({v["bvid"]: v for v in result["items"]}.values())
     return jsonify(result)

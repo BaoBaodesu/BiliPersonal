@@ -14,7 +14,7 @@ def settings():
 def update_settings(changes):
     if not isinstance(changes, dict) or set(changes) - set(SOURCE_DEFAULTS):
         raise ValueError("未知来源设置")
-    if any(changes.get(s, "off") not in SOURCE_LEVELS for s in ("hot", "rcmd")) or ("classic" in changes and type(changes["classic"]) is not bool):
+    if any(changes.get(s, "off") not in SOURCE_LEVELS for s in ("hot", "rcmd", "vertical_search")) or ("classic" in changes and type(changes["classic"]) is not bool):
         raise ValueError("非法来源档位或经典首页开关")
     value = {**settings(), **changes}
     set_state("sources:settings", value)
@@ -22,13 +22,18 @@ def update_settings(changes):
 
 
 def quotas(limit, options):
-    counts = {s: min(limit, {"small": 1, "standard": 3}.get(options[s], 0)) for s in ("rcmd", "hot")}
-    # 小页也先给原生来源占位，不超出页面容量。
-    counts["hot"] = min(counts["hot"], limit - counts["rcmd"])
-    remaining = limit - sum(counts.values())
-    total = sum(SOURCE_WEIGHTS.values())
-    counts.update({s: remaining * w // total for s, w in SOURCE_WEIGHTS.items()})
-    for source in sorted(SOURCE_WEIGHTS, key=lambda s: -(remaining * SOURCE_WEIGHTS[s] % total))[:remaining - sum(counts[s] for s in SOURCE_WEIGHTS)]:
+    from backend.services.recommendation_policy import ARCHIVE
+    policy = options.get("_policy", {})
+    weights = dict(SOURCE_WEIGHTS)
+    if policy.get("enabled"):
+        weights["up_archive"] = ARCHIVE[policy["settings"]["archive"]]
+    counts = {}
+    for source in ("rcmd", "hot", "vertical_search"):
+        counts[source] = min(limit-sum(counts.values()), {"small": 1, "standard": 3}.get(options.get(source, "off"), 0))
+    remaining = limit-sum(counts.values())
+    total = sum(weights.values())
+    counts.update({s: remaining*w//total for s, w in weights.items()})
+    for source in sorted(weights, key=lambda s: -(remaining*weights[s]%total))[:remaining-sum(counts[s] for s in weights)]:
         counts[source] += 1
     return counts
 
@@ -37,16 +42,40 @@ def quotas(limit, options):
 def mix(pools, limit=12, options=None, following=False):
     options = options or settings()
     queues = {s: list(v) for s, v in pools.items()}
+    from backend.services.recommendation_policy import EXPLORATION, ARCHIVE
+    policy = options.get("_policy", {})
+    enabled = policy.get("enabled", False) and not following
+    if not following:
+        for source in ("hot", "rcmd", "vertical_search"):
+            if options.get(source, "off") == "off":
+                queues[source] = []
+        if enabled and ARCHIVE[policy["settings"]["archive"]] == 0:
+            queues["up_archive"] = []
     targets = quotas(limit, options) if not following else {"follow": limit}
     selected, downranked, seen = [], [], set()
     ups, strangers = Counter(), Counter()
 
-    def take(source):
+    def take(source, wanted=None):
         while queues.get(source):
-            video = queues[source].pop(0)
+            if wanted is not None:
+                index = next((i for i, v in enumerate(queues[source]) if v["bvid"] == wanted), None)
+                if index is None:
+                    return False
+                video = queues[source].pop(index)
+            else:
+                video = queues[source].pop(0)
             key = up_key(video)
             stranger = source == "related" and video.get("stranger")
-            if video["bvid"] in seen or (not following and ups[key] >= SOURCE_UP_LIMIT):
+            if video["bvid"] in seen or (not following and ups[key] >= (1 if enabled else SOURCE_UP_LIMIT)):
+                continue
+            if enabled and source in ("hot", "rcmd", "vertical_search") and options.get(source) != "fallback" and sum(v["source"] == source for v in selected+downranked) >= targets.get(source, 0):
+                continue
+            meta = video.get("_policy", {})
+            chosen = selected+downranked
+            if video.get("replay") and any(v.get("replay") for v in chosen):
+                continue
+            if enabled and ((meta.get("pure_short") and sum(v.get("_policy", {}).get("pure_short", False) for v in chosen) >= 3) or
+                            (meta.get("exploratory") and sum(v.get("_policy", {}).get("exploratory", False) for v in chosen) >= EXPLORATION[policy["settings"]["exploration"]])):
                 continue
             if stranger and (sum(strangers.values()) >= SOURCE_STRANGER_LIMIT or strangers[key]):
                 continue
@@ -60,26 +89,44 @@ def mix(pools, limit=12, options=None, following=False):
             return True
         return False
 
+    if enabled:
+        covered = set()
+        available = [(source, v) for source, videos in queues.items() if source not in ("hot", "rcmd", "vertical_search") or options.get(source) != "fallback" for v in videos if v.get("_policy", {}).get("L", 0) > 0 and not v.get("downrank")]
+        available.sort(key=lambda entry: (entry[1]["rating"] is None, -(entry[1].get("rule_score") or 0)))
+        while available and len(selected) < min(4, limit):
+            index = next((i for i, (_, v) in enumerate(available) if set(v["_policy"]["topics"])-covered), 0)
+            source, video = available.pop(index)
+            if take(source, video["bvid"]):
+                covered.update(video["_policy"]["topics"])
     # 个性化来源交错输出，原生来源的固定名额先保留。
-    for index in range(max(targets.values(), default=0)):
-        for source in ("follow", "related", "up_archive", "rcmd", "hot"):
-            if index < targets.get(source, 0):
+    remaining_targets = {s: count-sum(v["source"] == s for v in selected+downranked) for s, count in targets.items()}
+    for index in range(max(remaining_targets.values(), default=0)):
+        for source in ("follow", "related", "up_archive", "rcmd", "hot", "vertical_search"):
+            if len(selected)+len(downranked) < limit and index < remaining_targets.get(source, 0):
                 take(source)
     while len(selected) + len(downranked) < limit:
         if not any(take(source) for source in ("follow", "related", "up_archive") if queues.get(source)):
             break
-    for source in ("rcmd", "hot"):
-        if options[source] == "fallback":
+    for source in ("rcmd", "hot", "vertical_search"):
+        if options.get(source, "off") == "fallback":
             while len(selected) + len(downranked) < limit and take(source):
                 pass
+    if enabled:
+        eligible = [v for v in selected if v.get("_policy", {}).get("top4_eligible")]
+        selected = eligible[:4]+[v for v in selected if v not in eligible[:4]]
+        for video in selected+downranked:
+            video["policy_diagnostics"] = {"top4_gap": max(0, 4-len(eligible)), "long_gap": max(0, 4-sum(v.get("_policy", {}).get("L", 0) > 0 for v in selected)), "short_page": len(selected)+len(downranked) < limit}
     return (selected + downranked)[:limit]
 
 
 def source_report():
     import time
     with connect() as conn:
-        rows = conn.execute("SELECT r.source,COUNT(*) served,SUM(EXISTS(SELECT 1 FROM recommendation_exposures e WHERE e.recommendation_id=r.id AND (e.visible_at IS NOT NULL OR e.acted_at IS NOT NULL))) exposed,SUM(r.clicked AND EXISTS(SELECT 1 FROM recommendation_exposures e WHERE e.recommendation_id=r.id AND (e.visible_at IS NOT NULL OR e.acted_at IS NOT NULL))) clicked,SUM(EXISTS(SELECT 1 FROM feedback f WHERE f.recommendation_id=r.id AND f.action='not_interested' AND f.revoked_at IS NULL) AND EXISTS(SELECT 1 FROM recommendation_exposures e WHERE e.recommendation_id=r.id AND (e.visible_at IS NOT NULL OR e.acted_at IS NOT NULL))) negative FROM recommendation_history r WHERE r.feed_type='for_you' AND r.source IN ('follow','related','up_archive','rcmd','hot') AND r.served_at>=? GROUP BY r.source", (time.time() - 7 * 86400,)).fetchall()
+        rows = conn.execute("SELECT r.source,COUNT(*) served,SUM(EXISTS(SELECT 1 FROM recommendation_exposures e WHERE e.recommendation_id=r.id AND (e.visible_at IS NOT NULL OR e.acted_at IS NOT NULL))) exposed,SUM(r.clicked AND EXISTS(SELECT 1 FROM recommendation_exposures e WHERE e.recommendation_id=r.id AND (e.visible_at IS NOT NULL OR e.acted_at IS NOT NULL))) clicked,SUM(EXISTS(SELECT 1 FROM feedback f WHERE f.recommendation_id=r.id AND f.action='not_interested' AND f.revoked_at IS NULL) AND EXISTS(SELECT 1 FROM recommendation_exposures e WHERE e.recommendation_id=r.id AND (e.visible_at IS NOT NULL OR e.acted_at IS NOT NULL))) negative FROM recommendation_history r WHERE r.feed_type='for_you' AND r.source IN ('follow','related','up_archive','rcmd','hot','vertical_search') AND r.served_at>=? GROUP BY r.source", (time.time() - 7 * 86400,)).fetchall()
     total = sum(row["served"] for row in rows)
-    return {"days": 7, "total": total, "sources": [{"source": row["source"] or "legacy", "served": row["served"], "exposed": row["exposed"],
+    from backend.services.interest_analysis import report
+    details = report(7)
+    blocked = {row["source"]: row["blocked_rate"] for row in details["sources"]}
+    return {"details": details, "days": 7, "total": total, "sources": [{"source": row["source"] or "legacy", "served": row["served"], "exposed": row["exposed"], "blocked_rate": blocked.get(row["source"]),
             "share": row["served"] / total if total else 0, "click_rate": row["clicked"] / row["exposed"] if row["exposed"] else None,
             "not_interested_rate": row["negative"] / row["exposed"] if row["exposed"] else None} for row in rows]}

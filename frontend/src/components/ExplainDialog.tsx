@@ -16,8 +16,8 @@ export function ExplainDialog({ video, onClose, returnFocus }: { video: Video; o
   const showRating = useUi((s) => s.showRating)
   useDialogFocus(dialog, true, onClose, returnFocus)
   const { data, isLoading, isError } = useQuery({
-    queryKey: ['explain', video.bvid],
-    queryFn: () => api.feed.explain(video.bvid),
+    queryKey: ['explain', video.bvid, video.recommendation_id],
+    queryFn: () => api.feed.explain(video.bvid, video.recommendation_id),
   })
 
   return createPortal(
@@ -39,7 +39,7 @@ export function ExplainDialog({ video, onClose, returnFocus }: { video: Video; o
         {isError && <p className="text-sm text-muted">暂时无法获取推荐原因。</p>}
         {data && (
           <div className="space-y-4 text-sm">
-            {data.related_history.length > 0 ? (
+            {data.historical ? <div className="space-y-2 text-muted"><p>按推荐生成时的快照解释；画像和参数之后的修改不会改写这条记录。</p>{data.policy?.profile_version ? <><p>主主题：{data.policy.primary_theme || '无'} · 长期 {(data.policy.L || 0).toFixed(2)}／短期 {(data.policy.S || 0).toFixed(2)}</p><p>画像版本：{data.policy.profile_version} · 策略：{data.policy.version}</p><p>规则分：{data.policy.rule_score == null ? '未评分' : data.policy.rule_score.toFixed(3)}（不是概率） · 作者频率惩罚 {(data.policy.creator_penalty || 0).toFixed(2)}</p>{data.policy.primary_query && <p className="break-all">主查询：{data.policy.primary_query}</p>}</> : <p>这条记录没有双画像证据快照，不能补造历史兴趣解释。</p>}</div> : data.related_history.length > 0 ? (
               <div>
                 <div className="mb-2 text-muted">因为你最近观看或收藏了：</div>
                 <ul className="space-y-1.5">

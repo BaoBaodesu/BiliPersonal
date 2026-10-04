@@ -60,14 +60,14 @@ class FeedOptimizationTest(unittest.TestCase):
         self.assertEqual(result["following_freshness"]["status"], "stale")
         self.assertEqual(result["notice"], "following_stale")
 
-    def test_category_completes_only_deficit(self):
+    def test_category_preserves_short_page_without_foreground_details(self):
         for i in range(15):
             fixtures.record_history(fixtures.video("fav-" + str(i), mid=i + 1, source="favorite"))
         self.fixture.save([fixtures.video(str(i), mid=i+1, _detail_complete=i<11) for i in range(15)])
         with patch.object(fixtures.bili, "detail", side_effect=lambda bvid: fixtures.video(bvid, mid=int(bvid)+1)) as detail, patch.object(fixtures.pool, "expand") as expand:
             result = fixtures.rs.recommendation.refresh("for_you", category="科技", view_id="deficit")
-        self.assertEqual(len(result["items"]), 12)
-        self.assertEqual(detail.call_count, 1)
+        self.assertEqual(len(result["items"]), 11)
+        self.assertEqual(detail.call_count, 0)
         expand.assert_not_called()
 
     def test_following_unready_failure_does_not_skip_to_old(self):
@@ -206,7 +206,7 @@ class FeedOptimizationTest(unittest.TestCase):
         for i in range(30):
             fixtures.record_history(fixtures.video("fav-"+str(i), mid=i+1, source="favorite"))
             # related 连续两次未点击才冷却，第一批提交触发第二次。
-            self.fixture.position(str(i))
+            self.fixture.position(str(i), served_at=time.time()-1801)
         self.fixture.save([fixtures.video(str(i), mid=i+1) for i in range(30)])
         barrier = threading.Barrier(2)
         original = fixtures.rs.recommendation.rank_sources

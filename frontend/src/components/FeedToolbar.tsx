@@ -7,11 +7,12 @@ interface Props {
   first?: FeedPage
   onRefresh: () => void
   refreshing: boolean
+  loading?: boolean
   children?: ReactNode
 }
 
 // 分类与换批共用一行，只有需要关注时才展示状态。
-export function FeedToolbar({ first, onRefresh, refreshing, children }: Props) {
+export function FeedToolbar({ first, onRefresh, refreshing, loading = false, children }: Props) {
   const { data: status } = useSystemStatus()
   const notices: { icon: typeof AlertCircle; text: string; tone?: string }[] = []
 
@@ -24,12 +25,9 @@ export function FeedToolbar({ first, onRefresh, refreshing, children }: Props) {
     notices.push({ icon: Loader2, text: '候选正在准备，可稍后换一批' })
   }
   if (status?.training) {
-    notices.push({
+    if (status.stage !== 'collecting') notices.push({
       icon: Loader2,
-      text:
-        status.stage === 'collecting'
-          ? '正在读取观看历史，完成后自动更新推荐'
-          : `模型训练中（${status.progress.epoch}/${status.progress.total || 30}），完成后自动更新`,
+      text: `模型训练中（${status.progress.epoch}/${status.progress.total || 30}），完成后自动更新`,
     })
   } else if (status?.model === 'error') {
     notices.push({ icon: AlertCircle, text: '模型暂时不可用，可在设置中查看状态或重试训练', tone: 'text-danger' })
@@ -52,6 +50,12 @@ export function FeedToolbar({ first, onRefresh, refreshing, children }: Props) {
           换一批
         </button>
       </div>
+      {(loading || (status?.training && status.stage === 'collecting')) && (
+        <div role="status" aria-live="polite" className="mt-3 flex items-center gap-3 rounded-xl border border-line bg-surface px-4 py-3 text-sm font-medium">
+          <Loader2 size={24} aria-hidden="true" className="shrink-0 animate-spin motion-reduce:animate-none" />
+          {loading ? '正在加载推荐数据，请稍候…' : '正在读取观看历史，请稍候，完成后自动更新推荐…'}
+        </div>
+      )}
       {notices.length > 0 && (
         <div role="status" className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 pt-2 text-xs text-muted">
           {notices.map((n) => (

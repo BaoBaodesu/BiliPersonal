@@ -22,6 +22,8 @@ def read_meta():
 
 class TrainingService:
     def __init__(self):
+        self.enabled = True
+        self._session_stopped = False
         self.recommender = None
         self.model_version = None
         self.stage = "none"
@@ -62,7 +64,11 @@ class TrainingService:
                 "history_updated_at": os.path.getmtime(HISTORY_PATH) if os.path.exists(HISTORY_PATH) else None,
                 "summary": meta.get("summary"), "v03":state}
 
+    def resume_session(self):
+        self._session_stopped = False
+
     def reset(self):
+        self._session_stopped = True
         self._stop.set()
         self._wake.set()
         with self._lock:
@@ -71,7 +77,11 @@ class TrainingService:
             self.stage = "none"
 
     def ensure_started(self, force_refresh=False, force_train=False):
+        if not self.enabled or self._session_stopped or not bili.has_cookie:
+            return False
         with self._lock:
+            if not self.enabled or self._session_stopped or not bili.has_cookie:
+                return False
             self._force_refresh |= force_refresh
             self._force_train |= force_train
             self._wake.set()
@@ -80,7 +90,8 @@ class TrainingService:
                     worker = self._thread
                     def resume():
                         worker.join()
-                        self.ensure_started()
+                        if self.enabled and not self._session_stopped and bili.has_cookie:
+                            self.ensure_started()
                     threading.Thread(target=resume,name="model-resume",daemon=True).start()
                     return True
                 return False

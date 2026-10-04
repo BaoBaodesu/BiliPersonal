@@ -40,7 +40,7 @@ RATE_LIMIT_BACKOFF = 90
 
 # v0.3.1：多路召回的窗口、配额和后台节奏
 SOURCE_WEIGHTS = {"follow": 4, "related": 4, "up_archive": 3}
-SOURCE_DEFAULTS = {"hot": "fallback", "rcmd": "small", "classic": False}
+SOURCE_DEFAULTS = {"vertical_search": "off", "hot": "fallback", "rcmd": "small", "classic": False}
 SOURCE_LEVELS = ("off", "fallback", "small", "standard")
 FOLLOW_WINDOW = 30 * 86400
 SOURCE_TTL = {"follow": 1800, "up_archive": 3600, "related": 1800}

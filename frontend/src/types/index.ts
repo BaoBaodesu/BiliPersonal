@@ -89,13 +89,15 @@ export interface SystemStatus {
 export type FeedbackAction = 'like' | 'not_interested' | 'block_up' | 'watched' | 'watch_later' | 'click' | 'undo'
 export type FeedbackReason = 'uploader' | 'topic' | 'clickbait'
 export type SourceLevel = 'off' | 'fallback' | 'small' | 'standard'
-export interface SourceSettings { hot: SourceLevel; rcmd: SourceLevel; classic: boolean }
+export interface SourceSettings { hot: SourceLevel; rcmd: SourceLevel; vertical_search: SourceLevel; classic: boolean }
 export interface SourceStatus {
   settings: SourceSettings
-  report: { days: number; total: number; sources: { source: string; served: number; exposed: number; share: number; click_rate: number | null; not_interested_rate: number | null }[] }
+  report: { days: number; total: number; sources: { source: string; served: number; exposed: number; share: number; blocked_rate?: number | null; click_rate: number | null; not_interested_rate: number | null }[] }
 }
 
 export interface Explain {
+  historical?: boolean
+  policy?: { version?: string; primary_source?: string; primary_theme?: string; primary_query?: string; L?: number; S?: number; creator_penalty?: number; rule_score?: number | null; signature?: string; profile_version?: string } | null
   bvid: string
   matched_tags: string[]
   related_history: { bvid: string; title: string; shared_tags: string[]; same_author: boolean }[]
@@ -193,6 +195,8 @@ export interface WeightedItem {
 }
 
 export interface Interests {
+  dual_profile?: DualProfile
+  analysis?: InterestAnalysis
   samples: number
   favorites: number
   top_tags: WeightedItem[]
@@ -212,3 +216,25 @@ export interface DebugInfo {
   recent_errors: { time: number; path: string; code: string | number; message: string }[]
   model: SystemStatus & { history_hash?: string }
 }
+
+
+export interface InterestTheme { state?: 'auto' | 'fixed' | 'paused' | 'excluded'; words?: string[]; queries?: string[] }
+export interface InterestSettings {
+  themes: Record<string, InterestTheme>; aliases: Record<string, string>
+  queries: Record<string, { paused?: boolean; theme?: string }>; query_blacklist: string[]
+  search_memory: boolean; special_ups: Record<string, { enabled?: boolean | null; queries?: string[] }>
+}
+export interface InterestEvidence { bvid: string; kind: string; weight: number; at: number | null; long: boolean }
+export interface DualProfile {
+  version: string; published_at: number | null; config: InterestSettings
+  topics: { name: string; state: string; qualified: boolean; qualification: string | null; L: number; S: number; watch_bvids: number; watch_days: number; watch_span_days: number; explicit_bvids: number; explicit_span_days: number; last_activity: number | null; half_life_days: number; evidence: InterestEvidence[] }[]
+}
+export interface PolicySettings { interest: string; exploration: string; archive: string }
+export interface AnalysisCounts { generated: number; exposed: number; clicks: number; ctr_proxy: number | null; not_interested_rate: number | null; blocked_rate: number | null }
+export interface InterestAnalysis {
+  days: number; limitations: string; sources: (AnalysisCounts & { source: string })[]
+  queries: (AnalysisCounts & { query: string; complete_candidates: number; complete_contributions: number; assisted_exposures: number; state: { recalled?: number; deduplicated?: number; accepted?: number; error_code?: number | null; last_at?: number; theme?: string; special_mid?: string } })[]
+  ups: { key: string; name: string; special: boolean; regular: boolean; familiar: boolean; following: boolean; level: string; blocked: boolean; downrank: boolean; creator_penalty: number }[]
+  special_sync: { status: string; at?: number; code?: number }
+}
+export interface PolicyTrial { status: string; days?: number; requires_revalidation?: boolean; metrics?: { generated: number; exposed: number; ctr_proxy: number | null; not_interested_rate: number | null; blocked_rate: number | null; long_coverage: number | null; short_pages: number; pages: number; candidate_attempts: number; search_attempts: number; rate_limited: boolean; limitations: string } }

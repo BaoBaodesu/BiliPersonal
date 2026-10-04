@@ -1,5 +1,6 @@
 import type {
   AuthStatus,
+  InterestSettings, PolicySettings, PolicyTrial,
   Category,
   DebugInfo,
   Explain,
@@ -69,24 +70,24 @@ export const api = {
     logout: () => post<{ success: boolean }>('/auth/logout'),
   },
   feed: {
-    get: (type: FeedType, category: string, cursor?: string | null, limit = 12, view_id?: string) => {
+    get: (type: FeedType, category: string, cursor?: string | null, limit = 12, view_id?: string, signal?: AbortSignal) => {
       const q = new URLSearchParams({ type, category, limit: String(limit) })
       if (cursor) q.set('cursor', cursor)
       if (view_id && !cursor) q.set('view_id', view_id)
-      return request<FeedPage>(`/feed?${q}`)
+      return request<FeedPage>(`/feed?${q}`, { signal })
     },
     refresh: (type: FeedType, category: string, limit = 12, view_id = crypto.randomUUID()) =>
       post<FeedPage>('/feed/refresh', { type, category, limit, view_id }),
     categories: () => request<{ items: Category[] }>('/feed/categories'),
-    explain: (bvid: string) => request<Explain>(`/feed/explain/${bvid}`),
+    explain: (bvid: string, recommendationId?: number) => request<Explain>(`/feed/explain/${bvid}${recommendationId ? `?recommendation_id=${recommendationId}` : ""}`),
     history: (offset = 0, type?: string) =>
       request<{ items: RecommendationRecord[]; total: number }>(
         `/feed/history?limit=50&offset=${offset}${type ? `&type=${type}` : ''}`,
       ),
   },
-  search: (q: string, page = 1) =>
+  search: (q: string, page = 1, signal?: AbortSignal) =>
     request<{ items: Video[]; page: number; num_pages: number }>(
-      `/search?q=${encodeURIComponent(q)}&page=${page}`,
+      `/search?q=${encodeURIComponent(q)}&page=${page}`, { signal },
     ),
   feedback: {
     send: (bvid: string, action: FeedbackAction, video?: Partial<Video>, event_id = crypto.randomUUID(), reason?: FeedbackReason) =>
@@ -144,8 +145,15 @@ export const api = {
     summary: () => request<FilterSummary>('/filters/summary'),
   },
   user: {
+    videoPreferences: () => request<Record<string, { purpose: string; allow_replay: boolean; replay_days: number }>>('/user/video-preferences'),
+    interestSettings: () => request<InterestSettings>('/user/interest-settings'),
+    setInterestSettings: (value: Partial<InterestSettings>) => request<InterestSettings>('/user/interest-settings', { method: 'PUT', body: JSON.stringify(value) }),
+    setVideoPreferences: (bvid: string, value: { purpose?: string; allow_replay?: boolean; replay_days?: number }) => request<{ purpose: string; allow_replay: boolean; replay_days: number }>(`/user/video-preferences/${bvid}`, { method: 'PUT', body: JSON.stringify(value) }),
+    recordSearch: (query: string, event_id: string) => post('/user/search-history', { query, event_id }),
+    searchHistory: () => request<{ enabled: boolean; items: { query: string; event_id: string; at: number }[] }>('/user/search-history'),
+    deleteSearch: (eventId?: string) => del(`/user/search-history${eventId ? `?event_id=${encodeURIComponent(eventId)}` : ''}`),
     profile: () => request<UserProfile>('/user/profile'),
-    interests: () => request<Interests>('/user/interests'),
+    interests: (days = 7) => request<Interests>(`/user/interests?days=${days}`),
     history: (cursor?: { max: number; view_at: number }) =>
       request<{ items: Video[]; cursor: { max: number; view_at: number }; has_more: boolean }>(
         `/user/history${cursor ? `?max=${cursor.max}&view_at=${cursor.view_at}` : ''}`,
@@ -160,6 +168,10 @@ export const api = {
     watchLater: () => request<{ items: (Video & { feedback_id: number; saved_at: number })[] }>('/user/watch-later'),
   },
   system: {
+    recommendationSettings: () => request<PolicySettings>('/system/recommendation-settings'),
+    setRecommendationSettings: (value: Partial<PolicySettings>) => request<PolicySettings>('/system/recommendation-settings', { method: 'PUT', body: JSON.stringify(value) }),
+    policyTrial: () => request<PolicyTrial>('/system/policy-trial'),
+    setPolicyTrial: (action: string) => post<PolicyTrial>('/system/policy-trial', { action }),
     sources: () => request<SourceStatus>('/system/sources'),
     setSources: (settings: Partial<SourceSettings>) => request<SourceStatus>('/system/sources', { method: 'PUT', body: JSON.stringify(settings) }),
     status: () => request<SystemStatus>('/system/status'),

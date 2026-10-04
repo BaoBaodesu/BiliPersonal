@@ -50,7 +50,7 @@ class HistorySync:
         return enriched
 
     @perf.background("history_sync")
-    @requests_scope.background
+    @requests_scope.collection
     def run(self, force=False, page_budget=10, stop=None):
         self.bootstrap()
         state = get_state("v03_history_sync", {})

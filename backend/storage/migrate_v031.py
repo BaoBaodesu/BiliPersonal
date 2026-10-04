@@ -23,3 +23,6 @@ def migrate(conn):
     CREATE INDEX IF NOT EXISTS idx_interest_penalties_active
     ON interest_penalties(kind, key, expires_at);
     """)
+
+    if "special" not in {row[1] for row in conn.execute("PRAGMA table_info(followings)")}:
+        conn.execute("ALTER TABLE followings ADD COLUMN special INTEGER")

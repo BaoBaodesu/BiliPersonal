@@ -22,7 +22,7 @@ export function FeedPage({ type }: { type: FeedType }) {
   const feed = useFeed(type, category, viewId)
   const refresh = useRefreshFeed(type, category, viewId)
   const first = feed.data?.pages[0]
-  const items = feed.data?.pages.flatMap((p) => p.items) ?? []
+  const items = (feed.data?.pages.flatMap((p) => p.items) ?? []).filter((v, index, all) => all.findIndex((item) => item.bvid === v.bvid) === index)
 
   useAutoUpgradeFeed(type, category, first ? first.ranked || first.items.length === 0 : undefined, viewId)
 
@@ -112,7 +112,7 @@ export function FeedPage({ type }: { type: FeedType }) {
     <div>
       <h1 className="sr-only">{TITLES[type]}</h1>
       <div className="sticky top-14 z-20 -mx-4 mb-4 bg-bg px-4 py-1.5 sm:-mx-6 sm:px-6">
-        <FeedToolbar first={first} onRefresh={() => refresh.mutate()} refreshing={refresh.isPending}>
+        <FeedToolbar first={first} onRefresh={() => refresh.mutate()} refreshing={refresh.isPending} loading={feed.isPending}>
           {type === 'following' ? <span className="text-sm font-medium">关注 · 最新发布</span> : <CategoryChips categories={cats?.items ?? DEFAULT_CATEGORIES} value={category} onChange={setCategory} />}
         </FeedToolbar>
       </div>

@@ -1,3 +1,6 @@
+import { useState } from 'react'
+import { InterestControls } from '../components/InterestControls'
+import { InterestAnalysis } from '../components/InterestAnalysis'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
 import type { WeightedItem } from '../types'
@@ -35,7 +38,8 @@ function Panel({ title, hint, children }: { title: string; hint?: string; childr
 }
 
 export function InterestPanel() {
-  const { data, isPending } = useQuery({ queryKey: ['interests'], queryFn: api.user.interests })
+  const [days, setDays] = useState(7)
+  const { data, isPending } = useQuery({ queryKey: ['interests', days], queryFn: () => api.user.interests(days) })
   if (isPending) {
     return (
       <div className="grid gap-4 md:grid-cols-2">
@@ -45,13 +49,16 @@ export function InterestPanel() {
       </div>
     )
   }
-  if (!data?.samples) return <EmptyState title="还没有足够的历史数据" description="模型训练完成后这里会显示你的兴趣画像。" />
+  if (!data) return <EmptyState title="画像读取失败" />
 
   const maxDuration = Math.max(1, ...data.durations.map((d) => d.count))
 
   return (
     <div className="grid gap-4 md:grid-cols-2">
-      <Panel title="长期兴趣 · Top Tags" hint={`基于 ${data.samples} 条历史 / 收藏样本，权重 = 收藏点赞与观看进度`}>
+      <div className="flex items-center gap-3 md:col-span-2"><label htmlFor="interest-days">统计窗口</label><select id="interest-days" value={days} onChange={(e) => setDays(Number(e.target.value))} className="min-h-11 rounded border border-line bg-bg px-3"><option value={7}>7天</option><option value={30}>30天</option></select></div>
+      <InterestAnalysis profile={data.dual_profile} analysis={data.analysis} />
+      <InterestControls />
+      <Panel title="累计标签 · 兼容统计" hint={`基于 ${data.samples} 条历史 / 收藏样本，权重 = 收藏点赞与观看进度`}>
         <WeightList items={data.top_tags} max={15} />
       </Panel>
       <Panel title="近期兴趣" hint="最近观看的视频中的标签">

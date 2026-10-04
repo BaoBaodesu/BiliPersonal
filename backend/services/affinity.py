@@ -120,8 +120,10 @@ class Affinity:
         from backend.services.filter_service import filters
         videos, _ = filters.filter_candidates(self.history())
         snapshot = self.snapshot()
+        from backend.services.interest_profile import preferences
+        prefs = preferences()
         videos = [v for v in videos if v["bvid"] not in used and not v.get("downrank") and not v.get("expand_disabled") and
-                  (v.get("isliked") or v.get("isfaved") or progress_ratio(v) >= .8) and
+                  (v.get("isliked") or (v.get("isfaved") and prefs.get(v["bvid"], {}).get("purpose", "normal") == "normal") or progress_ratio(v) >= .8) and
                   (category == "all" or v.get("tname") == category or category in ("recent", "discover"))]
         zones = self.zones()
         selected, counts = [], Counter()

@@ -359,10 +359,11 @@ class V03Test(unittest.TestCase):
             calls.append(1)
             (first if len(calls)==1 else second).set()
             service._stop.wait(2)
-        with patch.object(service,"_load_active"),patch.object(service,"_cycle",side_effect=cycle):
+        with patch("backend.services.training_service.bili._cookie", "fixture"),patch.object(service,"_load_active"),patch.object(service,"_cycle",side_effect=cycle):
             service.ensure_started()
             self.assertTrue(first.wait(2))
             service.reset()
+            service.resume_session()
             service.ensure_started()
             self.assertTrue(second.wait(2))
             service.reset()

@@ -3,11 +3,14 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 import time
+import json
+import threading
 
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
+_hour_lock = threading.Lock()
 _current = ContextVar("bili_request_scope", default=None)
 
 
@@ -20,7 +23,7 @@ def current():
 
 
 @contextmanager
-def scope(background=None, total=None, details=None, recalls=None, timeout=None, stop=None, candidate=False):
+def scope(background=None, total=None, details=None, recalls=None, timeout=None, stop=None, candidate=False, purpose=None):
     value = dict(current())
     if background is not None:
         value["background"] = background
@@ -30,6 +33,10 @@ def scope(background=None, total=None, details=None, recalls=None, timeout=None,
     if stop is not None:
         value["stop"] = stop
     value["candidate"] = value.get("candidate", False) or candidate
+    if purpose is not None:
+        value["purpose"] = purpose
+    elif candidate and "purpose" not in value:
+        value["purpose"] = "candidate"
     token = _current.set(value)
     try:
         yield value
@@ -62,6 +69,26 @@ def check(value, rate_limited=False, sending=True):
 
 
 def consume(value):
+    if value.get("purpose") in ("candidate", "search") and value.get("background"):
+        from backend.storage.database import connect
+        with _hour_lock, connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT value FROM app_state WHERE key='requests:candidate_hour'").fetchone()
+            attempts = [v for v in (json.loads(row[0]) if row else []) if v[0] > time.time()-3600]
+            search = value.get("purpose") == "search" and "/view/detail" not in value.get("url", "")
+            if len(attempts) >= 240 or search and sum(v[1] for v in attempts) >= 40:
+                raise BudgetEnded("hour_budget")
+            attempts.append([time.time(), search])
+            try:
+                conn.execute("INSERT INTO app_state VALUES('requests:candidate_hour',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", (json.dumps(attempts), time.time()))
+                totals = conn.execute("SELECT value FROM app_state WHERE key='requests:candidate_totals'").fetchone()
+                totals = json.loads(totals[0]) if totals else {"attempts": 0, "search": 0}
+                totals["attempts"] += 1
+                totals["search"] += int(search)
+                conn.execute("INSERT INTO app_state VALUES('requests:candidate_totals',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", (json.dumps(totals), time.time()))
+                conn.commit()
+            except Exception as error:
+                raise BudgetEnded("budget_persistence_failed") from error
     budget = value.get("budget")
     if budget:
         budget["total"] -= 1
@@ -102,3 +129,11 @@ class ManagedAdapter(HTTPAdapter):
         if current().get("managed"):
             self.gate(url=request.url)
         return super().send(request, **kwargs)
+
+
+def collection(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with scope(background=True, stop=kwargs.get("stop"), candidate=True, purpose="collection"):
+            return fn(*args, **kwargs)
+    return wrapped

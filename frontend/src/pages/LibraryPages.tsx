@@ -1,3 +1,4 @@
+import { VideoPreferences } from '../components/VideoPreferences'
 import { useState } from 'react'
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Trash2 } from 'lucide-react'
@@ -85,7 +86,7 @@ export function FavoritesPage() {
         <>
           <div className={GRID}>
             {items.map((v) => (
-              <VideoCard key={v.bvid} video={v} inFeed={false} />
+              <div key={v.bvid}><VideoCard video={v} inFeed={false} /><VideoPreferences bvid={v.bvid} /></div>
             ))}
             {query.isFetchingNextPage && <SkeletonCards count={4} />}
           </div>

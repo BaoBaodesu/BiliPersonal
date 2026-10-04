@@ -24,16 +24,18 @@ def capture():
         raise ValueError("五批已冻结，请评分，不能替换批次")
     from backend.storage.database import connect
     with connect() as conn:
-        generation = conn.execute("SELECT COALESCE(MAX(last_refresh_at),0) FROM candidates").fetchone()[0]
+        generation = conn.execute("SELECT COALESCE(MAX(updated_at),0) FROM candidates").fetchone()[0]
     if document["batches"] and generation <= document["batches"][-1]["pool_generated_at"]:
         raise ValueError("候选池尚未更新，请在另一时间更新候选后再冻结下一批")
     # 使用本地候选快照；可在不同时间完成正常浏览/更新候选后分别冻结。
     options = settings()
-    sources = tuple(source for source in SOURCES if source not in ("hot", "rcmd") or options[source] != "off")
+    sources = tuple(source for source in SOURCES if source not in ("hot", "rcmd", "vertical_search") or options[source] != "off")
     videos = [v for source in sources for v in pool.all((source,))]
+    from backend.services.recommendation_policy import freeze
+    baseline_policy = freeze(False)
     top = {}
     for version in (pair["current"], pair["candidate"]):
-        ranked = recommendation.rank_sources(videos, "for_you", "all", set(), registry.load(version), record_hits=False)
+        ranked = recommendation.rank_sources(videos, "for_you", "all", set(), registry.load(version), record_hits=False, policy=baseline_policy)
         items = mix(ranked, 10, options)
         if len(items) < 10:
             raise ValueError("某版本可评分候选不足十条，不能填造批次")
