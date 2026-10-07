@@ -49,6 +49,17 @@ def refresh_feed():
         return error("bad_request", str(e), 400)
 
 
+@bp.get("/feed/readiness")
+@api
+@login_required
+def readiness():
+    from backend.services.source_scheduler import scheduler
+    try:
+        return jsonify(scheduler.readiness(request.args.get("stream_id", "")))
+    except ValueError as exception:
+        return error("bad_request", str(exception), 400)
+
+
 @bp.get("/feed/categories")
 @api
 @login_required
@@ -84,8 +95,10 @@ def search():
     q = (request.args.get("q") or "").strip()
     if not q:
         return jsonify({"items": [], "page": 1, "num_pages": 0})
-    result = bili.search(q, int(request.args.get("page", 1)))
-    # 搜索结果同样应用统一过滤规则（不应用 served 去重）；命中计入规则的 hit_count
-    result["items"], _stats = filters.filter_candidates(result["items"], record=True)
-    result["items"] = list({v["bvid"]: v for v in result["items"]}.values())
-    return jsonify(result)
+    from backend.services.entity_search import search as entity_search
+    from backend.services.bilibili_service import BiliError, LoginExpired, RateLimited
+    try:
+        return jsonify(entity_search(q, int(request.args.get("page", 1)), request.args.get("entity_id"), request.args.get("cursor")))
+    except BiliError as exception:
+        status = 401 if isinstance(exception, LoginExpired) else 429 if isinstance(exception, RateLimited) else 502
+        return jsonify({"error": "login_expired" if status == 401 else "rate_limited" if status == 429 else "bilibili_error", "message": str(exception), "retry_cursor": getattr(exception, "search_cursor", None)}), status

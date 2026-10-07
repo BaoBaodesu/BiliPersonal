@@ -8,6 +8,9 @@ from backend.storage.database import get_state, set_state
 
 
 def directions(snapshot):
+    from backend.services.source_mixer import settings
+    from backend.services.recommendation_policy import settings as control_settings
+    from backend.services.entity_aliases import snapshot as entity_snapshot
     config = snapshot["config"]
     long, short = [], []
     for topic in snapshot["topics"]:
@@ -22,15 +25,24 @@ def directions(snapshot):
         if mid in profile.special_ups():
             long += [{"query": word, "special_mid": mid, "explicit": True} for word in up.get("queries", [])]
     long += [{"query": word, "theme": value.get("theme"), "explicit": True} for word, value in config["queries"].items() if not value.get("paused") and value.get("theme") in config["themes"] and config["themes"][value["theme"]].get("state") not in ("paused", "excluded")]
+    long = [{**item, "intent": "theme_search"} for item in long] if settings().get("vertical_search") != "off" else []
+    short = [{**item, "intent": "theme_search"} for item in short] if settings().get("vertical_search") != "off" else []
+    dictionary = entity_snapshot()
+    if control_settings()["third_party"] != "off":
+        for entity in dictionary["entities"]:
+            mids = {account["mid"] for account in entity["accounts"]} & profile.special_ups()
+            if entity["type"] == "up" and mids:
+                long += [{"query": word, "special_mid": sorted(mids)[0], "entity_id": entity["id"], "dictionary_version": dictionary["version"], "intent": "special_related", "explicit": True} for word in [entity["name"], *entity["aliases"]]]
     denied = set(config["query_blacklist"])
     seen = set()
     def valid(items):
         result = []
         for item in items:
             query = item["query"].strip()
-            if not query or query in seen or query in denied or config["queries"].get(query, {}).get("paused"):
+            key = (query, item.get("intent"), item.get("entity_id"))
+            if not query or key in seen or query in denied or config["queries"].get(query, {}).get("paused"):
                 continue
-            seen.add(query)
+            seen.add(key)
             result.append({**item, "query": query})
         return result
     long = valid(long)
@@ -40,11 +52,11 @@ def directions(snapshot):
 
 
 def fetch(stop=None):
-    from backend.services.source_mixer import settings
-    if settings().get("vertical_search", "off") == "off":
+    plan = directions(profile.snapshot())
+    if not plan:
         return []
     state = get_state("vertical:queries", {})
-    for direction in directions(profile.snapshot()):
+    for direction in plan:
         query = direction["query"]
         value = state.get(query, {})
         if value.get("failed_at", 0) > time.time()-900:
@@ -79,7 +91,8 @@ def fetch(stop=None):
         for video in result["items"]:
             if video["bvid"] not in seen:
                 seen.add(video["bvid"])
-                videos.append({**video, "source": "vertical_search", "query": query, "query_theme": direction.get("theme"), "special_mid": direction.get("special_mid"), "_detail_complete": False})
+                for reason in [item for item in plan if item["query"] == query]:
+                    videos.append({**video, "source": "vertical_search", "query": query, "query_theme": reason.get("theme"), "special_mid": reason.get("special_mid"), "intent": reason.get("intent"), "entity_id": reason.get("entity_id"), "dictionary_version": reason.get("dictionary_version"), "_detail_complete": False})
         videos, _ = filters.filter_candidates(videos, record=False)
         unique_count = len(seen)-before_seen
         value["seen"] = sorted(seen)
@@ -98,9 +111,18 @@ def fetch(stop=None):
     return []
 
 
-def eligible_reasons(reasons, config, special):
+def eligible_reasons(reasons, config, special, controls=None, video=None, theme_enabled=True):
     allowed = []
     for reason in reasons:
+        if reason.get("intent") == "special_related":
+            if controls and controls["settings"]["third_party"] == "off":
+                continue
+            if video is not None and controls and video.get("_detail_complete") is not False:
+                from backend.services.entity_aliases import identify
+                if not any(entity["entity_id"] == reason.get("entity_id") and not entity["bound"] and special & {a["mid"] for a in entity["accounts"]} for entity in identify(video, controls["dictionary"])["entities"]):
+                    continue
+        elif not theme_enabled:
+            continue
         query = reason.get("query", "")
         theme = reason.get("query_theme") or config["aliases"].get(profile.normalize(query), profile.normalize(query))
         if not query or query in config["query_blacklist"] or config["queries"].get(query, {}).get("paused") or config["themes"].get(theme, {}).get("state") in ("paused", "excluded"):

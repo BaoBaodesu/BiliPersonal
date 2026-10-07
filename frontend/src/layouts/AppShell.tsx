@@ -3,6 +3,7 @@ import { Header } from '../components/Header'
 import { Sidebar } from '../components/Sidebar'
 import { Toast } from '../components/Toast'
 import { DebugPanel } from '../components/DebugPanel'
+import { PolicyReviewNotice } from '../components/PolicyReviewNotice'
 import { OfflineState } from '../components/ErrorState'
 import { useAuth, useOnline } from '../hooks/queries'
 import { useUi } from '../stores/ui'
@@ -36,6 +37,7 @@ export function AppShell() {
                 <div className="mt-2 rounded-lg bg-surface px-4 py-2 text-sm text-muted">当前处于离线状态，显示的是已缓存内容。</div>
               )}
               <div className="page-content">
+                <PolicyReviewNotice />
                 <Outlet />
               </div>
             </>

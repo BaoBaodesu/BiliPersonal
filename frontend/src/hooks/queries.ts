@@ -1,8 +1,9 @@
-import { useEffect } from 'react'
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query'
+import { useEffect, useRef, useState } from 'react'
+import { useInfiniteQuery, useIsMutating, useMutation, useQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query'
 import { api } from '../api/client'
 import { useToast, useUi } from '../stores/ui'
 import type { FeedbackAction, FeedbackReason, FeedPage, FeedType, Video } from '../types'
+import { flush } from './useExposure'
 
 export const keys = {
   auth: ['auth'] as const,
@@ -56,13 +57,17 @@ export function useRefreshFeed(type: FeedType, category: string, viewId?: string
   const qc = useQueryClient()
   return useMutation({
     mutationKey: ['refresh-feed'],
-    mutationFn: () => api.feed.refresh(type, category),
+    mutationFn: async (recoveryViewId: string | void) => {
+      await Promise.race([flush(), new Promise((resolve) => setTimeout(resolve, 1000))])
+      return api.feed.refresh(type, category, 12, recoveryViewId || undefined)
+    },
     onMutate: async () => {
       await qc.cancelQueries({ queryKey: keys.feed(type, category, viewId), exact: true })
       window.scrollTo({ top: 0, behavior: 'instant' })
+      return { key: keys.feed(type, category, viewId) }
     },
-    onSuccess: (page) => {
-      qc.setQueryData<InfiniteData<FeedPage, string | null>>(keys.feed(type, category, viewId), {
+    onSuccess: (page, _, context) => {
+      qc.setQueryData<InfiniteData<FeedPage, string | null>>(context?.key || keys.feed(type, category, viewId), {
         pages: [page],
         pageParams: [null],
       })
@@ -70,6 +75,41 @@ export function useRefreshFeed(type: FeedType, category: string, viewId?: string
     },
     onError: () => useToast.getState().show('换批失败，已保留当前推荐，请稍后重试'),
   })
+}
+
+export function useFeedRecovery(type: FeedType, category: string, first: FeedPage | undefined, empty: boolean, short: boolean, viewId: string) {
+  const refreshing = useIsMutating({ mutationKey: ['refresh-feed'] })
+  const [visible, setVisible] = useState(!document.hidden)
+  const attempt = useRef<{ scope: string; version: string; viewId: string; complete: boolean; retries: number; retryAt: number } | null>(null)
+  const refresh = useRefreshFeed(type, category, viewId)
+  const qc = useQueryClient()
+  useEffect(() => {
+    const changed = () => setVisible(!document.hidden)
+    document.addEventListener('visibilitychange', changed)
+    return () => document.removeEventListener('visibilitychange', changed)
+  }, [])
+  const readiness = useQuery({
+    queryKey: ['feed-readiness', first?.stream_id],
+    queryFn: () => api.feed.readiness(first!.stream_id),
+    enabled: visible && (type === 'for_you' || type === 'explore') && !!first && (empty || short),
+    refetchInterval: visible ? 10_000 : false,
+    retry: false,
+  })
+  useEffect(() => {
+    const value = readiness.data
+    if (!visible || !empty || !first || refreshing || refresh.isPending || value?.status !== 'ready' || !value.version || value.available < 1) return
+    const scope = `${type}:${category}`
+    if (!attempt.current || attempt.current.scope !== scope || attempt.current.version !== value.version) attempt.current = { scope, version: value.version, viewId: crypto.randomUUID(), complete: false, retries: 0, retryAt: 0 }
+    const current = attempt.current
+    if (current.complete || Date.now() < current.retryAt || current.retries >= 3) return
+    refresh.mutate(current.viewId, {
+      onSuccess: () => { current.complete = true; qc.invalidateQueries({ queryKey: ['feed-readiness'] }) },
+      onError: () => { current.retries++; current.retryAt = Date.now()+10_000 },
+    })
+    // 同一准备版本只建立一个view；状态轮询推进重试，页面隐藏时暂停。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readiness.data, readiness.dataUpdatedAt, visible, empty, first?.stream_id, type, category])
+  return readiness
 }
 
 // 模型从未就绪变为就绪时，自动刷新当前 Feed（未排序 → 模型排序）

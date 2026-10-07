@@ -229,12 +229,30 @@ export interface DualProfile {
   version: string; published_at: number | null; config: InterestSettings
   topics: { name: string; state: string; qualified: boolean; qualification: string | null; L: number; S: number; watch_bvids: number; watch_days: number; watch_span_days: number; explicit_bvids: number; explicit_span_days: number; last_activity: number | null; half_life_days: number; evidence: InterestEvidence[] }[]
 }
-export interface PolicySettings { interest: string; exploration: string; archive: string }
+export interface PolicySettings { interest: string; exploration: string; archive: string; freshness: string; discovery: string; third_party: string }
+export type ReviewCandidate = Pick<PolicySettings, 'interest' | 'exploration' | 'archive'>
+export interface ReviewBatchSummary { id: string; number: number; status: string; total: number; rated: number; frozen_at: number; invalid_reason?: string }
+export interface PolicyReview {
+  id: string; protocol: string; status: string; revision: number; created_at: number; updated_at: number; abort_reason?: string
+  config: { candidate: ReviewCandidate; sources: SourceSettings; controls: Pick<PolicySettings, 'freshness' | 'discovery' | 'third_party'>; model_version: string; profile_version: string; dictionary_version: number }
+  preparation: { status?: string; reason?: string; qualified?: number; sources?: Record<string, number>; groups?: Record<string, number>; next_check_at?: number; change?: { new_bvids: number; required: number } }
+  batches: ReviewBatchSummary[]; completed_batches: number
+}
+export interface ReviewList { current: PolicyReview | null; experiments: PolicyReview[]; legacy: { id: string; protocol: string; status: string; read_only: boolean }[] }
+export interface BlindItem { blind_item_id: string; video: { bvid: string; title: string | null; author: string | null; pic: string | null; duration: number | null; pubdate: number | null; url: string }; score: number | null; revision: number }
+export interface BlindBatch { id: string; number: number; status: string; items: BlindItem[] }
+export interface ReviewGroup { average: number | null; long_coverage: number | null; top12: { samples: number; wanted: number | null; repelled: number | null }; top4: { samples: number; wanted: number | null; repelled: number | null } }
+export interface ReviewReport { protocol?: string; complete: boolean; passed: boolean; status?: string; groups?: Record<string, ReviewGroup>; guards?: { metric: string; label: string; difference: number; requirement: string; passed: boolean }[]; batches?: { number: number; groups: Record<string, ReviewGroup>; change: { new_bvids: number; union: number; jaccard: number | null } }[]; rated_occurrences?: number; unique_bvids?: number; limitations?: string }
+export interface Entity { id: string; type: 'up' | 'character' | 'work'; name: string; aliases: string[]; accounts: { mid: string; name: string }[] }
+export interface EntityDictionary { version: number; entities: Entity[] }
+export interface SearchResult { items: Video[]; page: number; num_pages?: number; entity?: Entity; entity_choices?: Entity[]; queries?: string[]; has_more?: boolean; next_cursor?: string | null; retry_cursor?: string | null; errors?: string[] }
+export interface FeedReadiness { status: string; version: string | null; available: number; complete_pages: number; at_least?: boolean; retry_at: number }
 export interface AnalysisCounts { generated: number; exposed: number; clicks: number; ctr_proxy: number | null; not_interested_rate: number | null; blocked_rate: number | null }
 export interface InterestAnalysis {
+  diagnostics?: { generated: number; exposed: number; repetition: Record<string, { same_page_rate: number | null; cross_page_rate: number | null; attributed: number }>; freshness: { name: string; generated: number; exposed: number }[]; aliases: { field: string; generated: number; exposed: number }[]; readiness: FeedReadiness[]; limitations: string }
   days: number; limitations: string; sources: (AnalysisCounts & { source: string })[]
   queries: (AnalysisCounts & { query: string; complete_candidates: number; complete_contributions: number; assisted_exposures: number; state: { recalled?: number; deduplicated?: number; accepted?: number; error_code?: number | null; last_at?: number; theme?: string; special_mid?: string } })[]
   ups: { key: string; name: string; special: boolean; regular: boolean; familiar: boolean; following: boolean; level: string; blocked: boolean; downrank: boolean; creator_penalty: number }[]
   special_sync: { status: string; at?: number; code?: number }
 }
-export interface PolicyTrial { status: string; days?: number; requires_revalidation?: boolean; metrics?: { generated: number; exposed: number; ctr_proxy: number | null; not_interested_rate: number | null; blocked_rate: number | null; long_coverage: number | null; short_pages: number; pages: number; candidate_attempts: number; search_attempts: number; rate_limited: boolean; limitations: string } }
+export interface PolicyTrial { status: string; days?: number; requires_revalidation?: boolean; metrics?: { clicks?: number; top4_ctr?: number | null; top4_exposed?: number; generated: number; exposed: number; ctr_proxy: number | null; not_interested_rate: number | null; blocked_rate: number | null; long_coverage: number | null; short_pages: number; pages: number; candidate_attempts: number; search_attempts: number; rate_limited: boolean; limitations: string } }

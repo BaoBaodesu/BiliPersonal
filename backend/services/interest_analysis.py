@@ -57,7 +57,48 @@ def report(days=7):
     for key, up in snapshot["ups"].items():
         kept, _ = filters.filter_candidates([{"bvid": key, "mid": up["mid"], "author": up["name"]}], record=False)
         ups.append({**up, "key": key, "special": key in special, "blocked": not bool(kept), "downrank": bool(kept and kept[0].get("downrank")) or any(p["kind"] == "up" and p["key"] == key for p in penalties), "creator_penalty": .02*min(3, frequency.get(key, 0))})
-    return {"days": days, "sources": [{"source": source, **summarize(values)} for source, values in sources.items()],
+    return {"days": days, "diagnostics": diagnostics(days), "sources": [{"source": source, **summarize(values)} for source, values in sources.items()],
             "queries": [{"query": query, "state": states.get(query, {}), "complete_candidates": len(complete[query]), "complete_contributions": sum(at > time.time()-days*86400 for at in contributions.get(query, {}).values()), "assisted_exposures": assisted[query], **summarize(queries[query])} for query in sorted(set(states)|set(queries)|set(complete))],
             "ups": ups,
             "special_sync": get_state("sources:special_status", {"status": "unknown"}), "limitations": "点击率是代理指标；旧记录缺少来源时不补造主归因。辅助曝光不计入主查询分母。"}
+
+
+def diagnostics(days):
+    """按位置级真实可见统计，不用当前词典改写过去归因。"""
+    with connect() as conn:
+        generated = conn.execute("SELECT * FROM recommendation_history WHERE served_at>=? AND feed_type IN ('for_you','explore')", (time.time()-days*86400,)).fetchall()
+        exposed = conn.execute("SELECT r.*,e.visible_at FROM recommendation_history r JOIN recommendation_exposures e ON e.recommendation_id=r.id WHERE e.visible_at BETWEEN ? AND ? AND r.feed_type IN ('for_you','explore') ORDER BY e.visible_at,r.id", (time.time()-days*86400, time.time())).fetchall()
+        readiness = [json.loads(row[0]) for row in conn.execute("SELECT value FROM app_state WHERE key LIKE 'feed:readiness:%'")]
+    freshness = {name: {"generated": 0, "exposed": 0} for name in ("7天内", "8–30天", "31–90天", "91–365天", "365天以上", "未知日期")}
+    aliases = {name: {"generated": 0, "exposed": 0} for name in ("account", "title", "tag")}
+    for kind, rows in (("generated", generated), ("exposed", exposed)):
+        for row in rows:
+            video = json.loads(row["video_snapshot"] or "{}")
+            age = video.get("_controls", {}).get("age_days")
+            if age is None and 0 < (video.get("pubdate") or 0) <= row["served_at"]:
+                age = (row["served_at"]-video["pubdate"])/86400
+            bucket = "未知日期" if age is None else "7天内" if age <= 7 else "8–30天" if age <= 30 else "31–90天" if age <= 90 else "91–365天" if age <= 365 else "365天以上"
+            freshness[bucket][kind] += 1
+            for field in {hit["field"] for entity in video.get("entity_attribution", {}).get("entities", []) for hit in entity["hits"]}:
+                if field in aliases:
+                    aliases[field][kind] += 1
+    repeated = {name: {"same_page": 0, "cross_page": 0, "attributed": 0} for name in ("publisher", "subject")}
+    seen, active = {}, {}
+    for row in exposed:
+        video = json.loads(row["video_snapshot"] or "{}")
+        page = (row["stream_id"], row["page"])
+        keys = {"publisher": {str(video.get("mid") or video.get("author"))} if video.get("mid") or video.get("author") else set(),
+                "subject": {entity["entity_id"] for entity in video.get("entity_attribution", {}).get("entities", []) if entity["type"] == "up"}}
+        active = {key: [(at, value) for at, value in items if at >= row["visible_at"]-1800] for key, items in active.items()}
+        previous = sorted((key for key, items in active.items() if items and key != page), key=lambda key: active[key][-1][0], reverse=True)[:2]
+        for name, values in keys.items():
+            if not values:
+                continue
+            repeated[name]["attributed"] += 1
+            repeated[name]["same_page"] += bool(values & seen.setdefault(page, {"publisher": set(), "subject": set()})[name])
+            repeated[name]["cross_page"] += any(values & evidence[name] for key in previous for _, evidence in active[key])
+            seen[page][name].update(values)
+        active.setdefault(page, []).append((row["visible_at"], keys))
+    return {"generated": len(generated), "exposed": len(exposed), "repetition": {name: {**counts, "same_page_rate": counts["same_page"]/counts["attributed"] if counts["attributed"] else None, "cross_page_rate": counts["cross_page"]/counts["attributed"] if counts["attributed"] else None} for name, counts in repeated.items()},
+            "freshness": [{"name": name, **counts} for name, counts in freshness.items()], "aliases": [{"field": name, **counts} for name, counts in aliases.items()], "readiness": readiness,
+            "limitations": "真实曝光仅使用visible_at；跨页重复指最近30分钟前两个曝光页出现过，不等同超限。库存是当前检查估计，不预留。"}

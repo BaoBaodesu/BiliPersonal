@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import type { InterestSettings, InterestTheme } from '../types'
+import { EntityControls } from './EntityControls'
 
 const inputClass = 'min-h-11 rounded-lg border border-line bg-bg px-3 text-sm'
 export function InterestControls() {
@@ -41,5 +42,6 @@ export function InterestControls() {
     {history.data?.items.map((item) => <div key={item.event_id} className="flex items-center justify-between gap-3 text-sm"><span>{item.query}</span><button disabled={remove.isPending} className={inputClass} onClick={() => remove.mutate(item.event_id)}>删除</button></div>)}
     <label className="block text-sm">查询黑名单<input aria-label="查询黑名单" className={`${inputClass} mt-2 w-full`} defaultValue={config.query_blacklist.join(',')} onBlur={(e) => { if (e.target.value !== config.query_blacklist.join(',')) save.mutate({ query_blacklist: split(e.target.value) } as Partial<InterestSettings>) }} /></label>
     {(save.error || remove.error) && <p role="alert" className="text-sm text-danger">{(save.error || remove.error)?.message}</p>}
+    <EntityControls />
   </div>
 }

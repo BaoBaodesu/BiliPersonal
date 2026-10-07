@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
-import { keys, useAutoUpgradeFeed, useFeed, useRefreshFeed } from '../hooks/queries'
+import { keys, useAutoUpgradeFeed, useFeed, useRefreshFeed, useFeedRecovery } from '../hooks/queries'
 import type { Category, FeedType } from '../types'
 import { CategoryChips } from '../components/CategoryChips'
 import { FeedToolbar } from '../components/FeedToolbar'
@@ -23,6 +23,7 @@ export function FeedPage({ type }: { type: FeedType }) {
   const refresh = useRefreshFeed(type, category, viewId)
   const first = feed.data?.pages[0]
   const items = (feed.data?.pages.flatMap((p) => p.items) ?? []).filter((v, index, all) => all.findIndex((item) => item.bvid === v.bvid) === index)
+  const readiness = useFeedRecovery(type, category, first, !items.length, (feed.data?.pages.at(-1)?.items.length ?? 12) < 12, viewId)
 
   useAutoUpgradeFeed(type, category, first ? first.ranked || first.items.length === 0 : undefined, viewId)
 
@@ -69,7 +70,7 @@ export function FeedPage({ type }: { type: FeedType }) {
         description={
           category === 'all'
             ? first?.notice === 'accumulating'
-              ? '个性化候选仍在积累，或已被观看、冷却和屏蔽规则过滤。稍后换一批，或在设置中调整推荐来源。'
+              ? '个性化候选仍在积累，或已被观看、冷却和屏蔽规则过滤。页面可见时会检查准备状态，有合格候选后自动恢复。'
               : type === 'following' ? '关注动态暂时没有可用的视频，稍后刷新试试。' : '候选池中的视频都已经展示过或被过滤了。稍后换一批，会重新抓取新的候选。'
             : '换个分类看看，或者稍后再来。'
         }
@@ -120,6 +121,10 @@ export function FeedPage({ type }: { type: FeedType }) {
         <div className="progress-bar fixed top-14 right-0 left-0 z-30 h-0.5 overflow-hidden" aria-hidden />
       )}
       {body}
+      {!items.length && readiness.data?.status === 'checking' && <p role="status" className="pb-4 text-sm text-muted">正在检查本地候选准备状态…</p>}
+      {!items.length && readiness.data?.status === 'waiting' && <p role="status" className="pb-4 text-sm text-muted">后台正在补充候选，暂时保留空页。</p>}
+      {!!items.length && readiness.data?.status === 'ready' && <p role="status" className="py-4 text-sm text-muted">新候选已准备好，当前内容已保留。<button className="min-h-11 px-3 text-accent" disabled={refresh.isPending} onClick={() => refresh.mutate()}>换一批</button></p>}
+      {!items.length && readiness.isError && <p role="status" className="pb-4 text-sm text-muted">后台准备状态暂时无法读取，可手动换一批重试。</p>}
     </div>
   )
 }

@@ -30,7 +30,8 @@ class CandidatePool:
         return time.time() - self.state(source)["last_refresh_at"] > SOURCE_TTL.get(source, POOL_TTL)
 
     @perf.measured("pool_read_ms", source_arg=1)
-    def all(self, sources):
+    def all(self, sources, clock=None):
+        clock = time.time() if clock is None else clock
         perf.add("pool_read_calls")
         if not sources:
             return []
@@ -45,7 +46,7 @@ class CandidatePool:
         seen = {}
         videos = []
         for row in rows:
-            if row["last_refresh_at"] < time.time() - SOURCE_KEEP.get(row["source"], POOL_KEEP):
+            if row["last_refresh_at"] < clock - SOURCE_KEEP.get(row["source"], POOL_KEEP):
                 continue
             video = perf.decode_json(row["data"])
             reasons = json.loads(row["reasons"])

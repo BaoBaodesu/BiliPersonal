@@ -13,7 +13,7 @@ function save() {
   try { sessionStorage.setItem(key, JSON.stringify([...pending.values()])) } catch { /* 隐私模式仍保留内存重试。 */ }
 }
 
-async function flush() {
+export async function flush() {
   if (sending) return
   sending = true
   for (const event of [...pending.values()]) {

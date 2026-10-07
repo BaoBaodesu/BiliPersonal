@@ -8,6 +8,7 @@ from functools import wraps
 from flask import jsonify
 
 from backend.services.bilibili_service import BiliError, LoginExpired, RateLimited, bili
+from backend.services.policy_review import ReviewError
 
 
 def error(code, message, status):
@@ -19,6 +20,8 @@ def api(fn):
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
+        except ReviewError as e:
+            return error(e.code, str(e), e.status)
         except LoginExpired:
             return error("login_expired", "登录已失效，请重新扫码登录", 401)
         except RateLimited:

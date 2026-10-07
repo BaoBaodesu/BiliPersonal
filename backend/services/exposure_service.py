@@ -52,8 +52,10 @@ def record_exposures(items):
             associated = associate(conn, {**item, "exposure_id": item.get("id")})
             if not associated:
                 raise ValueError("缺少推荐位置")
-            conn.execute("UPDATE recommendation_exposures SET visible_at=COALESCE(visible_at,?) WHERE id=?",
-                         (visible, associated[1]))
+            changed = conn.execute("UPDATE recommendation_exposures SET visible_at=? WHERE id=? AND visible_at IS NULL", (visible, associated[1])).rowcount
+            if changed:
+                from backend.services.recommendation_controls import invalidate
+                invalidate(conn)
     return {"ok": True}
 
 

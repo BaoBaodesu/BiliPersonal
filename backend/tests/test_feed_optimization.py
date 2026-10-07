@@ -20,7 +20,7 @@ class FeedOptimizationTest(unittest.TestCase):
 
     def test_ready_and_redistribution_need_no_network(self):
         for i in range(20):
-            fixtures.record_history(fixtures.video("fav-" + str(i), mid=i + 1, source="favorite"))
+            fixtures.record_history(fixtures.video("fav-" + str(i), mid=i + 1, source="favorite", fav_time=time.time()))
         self.fixture.save([fixtures.video(str(i), mid=i + 1) for i in range(20)])
         with patch.object(fixtures.pool, "complete") as complete, patch.object(fixtures.pool, "expand") as expand:
             result = fixtures.rs.recommendation.refresh("for_you", view_id="ready")
@@ -35,7 +35,7 @@ class FeedOptimizationTest(unittest.TestCase):
         self.assertFalse(first["has_more"])
         self.fixture.save([fixtures.video(str(i), mid=i + 10) for i in range(20)])
         for i in range(20):
-            fixtures.record_history(fixtures.video("fav-" + str(i), mid=i + 10, source="favorite"))
+            fixtures.record_history(fixtures.video("fav-" + str(i), mid=i + 10, source="favorite", fav_time=time.time()))
         self.assertEqual(first, fixtures.rs.recommendation.refresh("for_you", view_id="short"))
         self.assertEqual(len(fixtures.rs.recommendation.refresh("for_you", view_id="new")["items"]), 12)
 
@@ -62,7 +62,7 @@ class FeedOptimizationTest(unittest.TestCase):
 
     def test_category_preserves_short_page_without_foreground_details(self):
         for i in range(15):
-            fixtures.record_history(fixtures.video("fav-" + str(i), mid=i + 1, source="favorite"))
+            fixtures.record_history(fixtures.video("fav-" + str(i), mid=i + 1, source="favorite", fav_time=time.time()))
         self.fixture.save([fixtures.video(str(i), mid=i+1, _detail_complete=i<11) for i in range(15)])
         with patch.object(fixtures.bili, "detail", side_effect=lambda bvid: fixtures.video(bvid, mid=int(bvid)+1)) as detail, patch.object(fixtures.pool, "expand") as expand:
             result = fixtures.rs.recommendation.refresh("for_you", category="科技", view_id="deficit")
@@ -80,7 +80,7 @@ class FeedOptimizationTest(unittest.TestCase):
     def test_background_low_water_uses_real_ready_and_limits_work(self):
         worker = fixtures.SourceScheduler()
         for i in range(40):
-            fixtures.record_history(fixtures.video("fav-"+str(i), mid=i+1, source="favorite"))
+            fixtures.record_history(fixtures.video("fav-"+str(i), mid=i+1, source="favorite", fav_time=time.time()))
         self.fixture.save([fixtures.video(str(i), mid=i+1, _detail_complete=False) for i in range(40)])
         with patch.object(worker, "start"):
             worker.request_refill("for_you", "all", 12, fixtures.settings(), "old")
@@ -93,7 +93,7 @@ class FeedOptimizationTest(unittest.TestCase):
     def test_background_high_water_and_demand_bound(self):
         worker = fixtures.SourceScheduler()
         for i in range(40):
-            fixtures.record_history(fixtures.video("fav-"+str(i), mid=i+1, source="favorite"))
+            fixtures.record_history(fixtures.video("fav-"+str(i), mid=i+1, source="favorite", fav_time=time.time()))
         self.fixture.save([fixtures.video(str(i), mid=i+1) for i in range(40)])
         with patch.object(worker, "start"):
             worker.request_refill("for_you", "all", 12, fixtures.settings(), "old")
@@ -204,7 +204,7 @@ class FeedOptimizationTest(unittest.TestCase):
 
     def test_cross_stream_commit_rechecks_cooldown(self):
         for i in range(30):
-            fixtures.record_history(fixtures.video("fav-"+str(i), mid=i+1, source="favorite"))
+            fixtures.record_history(fixtures.video("fav-"+str(i), mid=i+1, source="favorite", fav_time=time.time()))
             # related 连续两次未点击才冷却，第一批提交触发第二次。
             self.fixture.position(str(i), served_at=time.time()-1801)
         self.fixture.save([fixtures.video(str(i), mid=i+1) for i in range(30)])

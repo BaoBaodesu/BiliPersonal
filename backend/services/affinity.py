@@ -44,42 +44,47 @@ class Affinity:
         return list(videos.values())
 
     @perf.measured("affinity_ms")
-    def snapshot(self):
+    def snapshot(self, clock=None):
+        clock = time.time() if clock is None else clock
         with connect() as conn:
             # 观看窗口与收藏证据独立；同一 BV 的多次观看只计一个视频。
-            watched = conn.execute("SELECT * FROM history_events WHERE source='history' ORDER BY COALESCE(watched_at,observed_at) DESC,id DESC LIMIT 1000").fetchall()
-            events = conn.execute("SELECT * FROM history_events WHERE isliked=1 OR isfaved=1 OR source='favorite'").fetchall()
+            watched = conn.execute("SELECT * FROM history_events WHERE source='history' AND watched_at BETWEEN ? AND ? ORDER BY watched_at DESC,id DESC", (clock-90*86400, clock)).fetchall()
+            events = conn.execute("SELECT * FROM history_events WHERE (isfaved=1 OR source='favorite') AND faved_at BETWEEN ? AND ?", (clock-90*86400, clock)).fetchall()
             followings = {str(row[0]) for row in conn.execute("SELECT mid FROM followings")}
-            actions = conn.execute("SELECT bvid,action,video FROM feedback WHERE revoked_at IS NULL AND action IN ('like','watched')").fetchall()
+            actions = conn.execute("SELECT bvid,action,video,created_at FROM feedback WHERE revoked_at IS NULL AND action IN ('like','watched')").fetchall()
             seen = {row[0] for row in conn.execute("SELECT DISTINCT bvid FROM history_events WHERE source!='favorite' AND (source='history' OR watched_at IS NOT NULL)")}
             favorites = {row[0] for row in conn.execute("SELECT DISTINCT bvid FROM history_events WHERE source='favorite' OR isfaved=1 OR faved_at IS NOT NULL")}
+        from backend.services.interest_profile import preferences
+        prefs = preferences()
         ups = {}
         for row in watched:
             video = json.loads(row["video"])
             key = up_key(video)
             if not key:
                 continue
-            up = ups.setdefault(key, {"mid": video.get("mid"), "name": video.get("author", ""), "videos": set(), "familiar": False, "regular": False})
+            up = ups.setdefault(key, {"mid": video.get("mid"), "name": video.get("author", ""), "videos": set(), "days": set(), "familiar": False, "regular": False})
             ratio = progress_ratio(video)
             if ratio >= .5:
                 up["videos"].add(row["bvid"])
+                up["days"].add(int((row["watched_at"]+8*3600)//86400))
             if ratio >= 1:
                 up["familiar"] = True
         for row in events:
             video = json.loads(row["video"])
             key = up_key(video)
-            if key:
-                ups.setdefault(key, {"mid": video.get("mid"), "name": video.get("author", ""), "videos": set(), "familiar": False, "regular": False})["regular"] = True
+            if key and prefs.get(row["bvid"], {}).get("purpose", "normal") == "normal":
+                ups.setdefault(key, {"mid": video.get("mid"), "name": video.get("author", ""), "videos": set(), "days": set(), "familiar": False, "regular": False})["regular"] = True
         for row in actions:
             if row["action"] == "watched":
                 seen.add(row["bvid"])
-            else:
+            elif clock-90*86400 <= row["created_at"] <= clock:
                 video = json.loads(row["video"] or "{}")
                 key = up_key(video)
                 if key:
-                    ups.setdefault(key, {"mid": video.get("mid"), "name": video.get("author", ""), "videos": set(), "familiar": False, "regular": False})["regular"] = True
+                    ups.setdefault(key, {"mid": video.get("mid"), "name": video.get("author", ""), "videos": set(), "days": set(), "familiar": False, "regular": False})["regular"] = True
         for key, up in ups.items():
-            up["regular"] = up["regular"] or len(up["videos"]) >= 3
+            up["regular"] = up["regular"] or len(up["videos"]) >= 3 and len(up.pop("days")) >= 2
+            up.pop("days", None)
             up["watched_count"] = len(up.pop("videos"))
             up["following"] = key in followings
             up["level"] = "regular" if up["regular"] else "familiar" if up["familiar"] else "stranger"
@@ -90,9 +95,9 @@ class Affinity:
         key = up_key(video)
         return key not in snapshot["followings"] and snapshot["ups"].get(key, {}).get("level", "stranger") == "stranger"
 
-    def penalties(self):
+    def penalties(self, clock=None):
         with connect() as conn:
-            return [dict(row) for row in conn.execute("SELECT * FROM interest_penalties WHERE revoked_at IS NULL AND expires_at>?", (time.time(),))]
+            return [dict(row) for row in conn.execute("SELECT * FROM interest_penalties WHERE revoked_at IS NULL AND expires_at>?", (time.time() if clock is None else clock,))]
 
     def quality_gate(self, videos, snapshot=None):
         snapshot = snapshot or self.snapshot()
@@ -122,19 +127,27 @@ class Affinity:
         snapshot = self.snapshot()
         from backend.services.interest_profile import preferences
         prefs = preferences()
-        videos = [v for v in videos if v["bvid"] not in used and not v.get("downrank") and not v.get("expand_disabled") and
-                  (v.get("isliked") or (v.get("isfaved") and prefs.get(v["bvid"], {}).get("purpose", "normal") == "normal") or progress_ratio(v) >= .8) and
+        with connect() as conn:
+            evidence = {}
+            for row in conn.execute("SELECT * FROM history_events WHERE watched_at BETWEEN ? AND ? OR faved_at BETWEEN ? AND ?", (time.time()-90*86400, time.time(), time.time()-90*86400, time.time())):
+                if row["source"] == "history" and progress_ratio(json.loads(row["video"])) >= .8 and row["watched_at"] and time.time()-90*86400 <= row["watched_at"] <= time.time():
+                    evidence[row["bvid"]] = max(evidence.get(row["bvid"], 0), row["watched_at"])
+                if row["faved_at"] and time.time()-90*86400 <= row["faved_at"] <= time.time() and prefs.get(row["bvid"], {}).get("purpose", "normal") == "normal":
+                    evidence[row["bvid"]] = max(evidence.get(row["bvid"], 0), row["faved_at"])
+            likes = {row["bvid"]: row["created_at"] for row in conn.execute("SELECT bvid,created_at FROM feedback WHERE action='like' AND revoked_at IS NULL AND created_at BETWEEN ? AND ?", (time.time()-90*86400, time.time()))}
+            evidence.update({bvid: max(at, evidence.get(bvid, 0)) for bvid, at in likes.items()})
+        videos = [v for v in videos if v["bvid"] not in used and time.time()-90*86400 <= evidence.get(v["bvid"], 0) <= time.time() and not v.get("downrank") and not v.get("expand_disabled") and
                   (category == "all" or v.get("tname") == category or category in ("recent", "discover"))]
         zones = self.zones()
         selected, counts = [], Counter()
         # 逐次按兴趣占比选择分区，避免种子全挤在同一个分区。
         while videos and len(selected) < limit:
             zone = max({v.get("tname", "") for v in videos}, key=lambda z: zones.get(z, 1) / (counts[z] + 1))
-            video = max((v for v in videos if v.get("tname", "") == zone), key=lambda v: (v.get("isliked", 0) or 0, v.get("isfaved", 0) or 0, v.get("observed_at", 0)))
+            video = max((v for v in videos if v.get("tname", "") == zone), key=lambda v: (v["bvid"] in likes, v.get("isfaved", 0) or 0, evidence.get(v["bvid"], 0)))
             if up_key(video) in snapshot["ups"] or up_key(video) in snapshot["followings"]:
                 selected.append(video)
                 counts[zone] += 1
-            videos.remove(video)
+            videos = [v for v in videos if up_key(v) != up_key(video)]
         return selected
 
 

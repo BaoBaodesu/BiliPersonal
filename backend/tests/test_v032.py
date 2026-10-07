@@ -248,6 +248,23 @@ class V032Test(unittest.TestCase):
         expand.assert_not_called()
         self.assertLess(db.get_state("sources:warm_categories")["旧分类"], time.time()-86400)
 
+    def test_category_refill_completes_unknown_partition_only(self):
+        from backend.services.source_scheduler import SourceScheduler
+        worker = SourceScheduler()
+        db.set_state("sources:warm_categories", {"科技": time.time()})
+        pool._save("related", [video("unknown-tech", tname=None, _detail_complete=False),
+                               video("unknown-other", tname="", _detail_complete=False),
+                               video("known-other", tname="生活", _detail_complete=False)])
+        with patch.object(rs.recommendation, "ready_buffer", side_effect=lambda feed, category, *args: (3 if category == "all" else 0, {})), \
+             patch.object(rs.recommendation, "_mixed_sources", return_value=("related",)), \
+             patch.object(pool, "is_stale", return_value=False), \
+             patch.object(bili, "detail", side_effect=lambda bvid: video(bvid, tname="科技" if bvid == "unknown-tech" else "生活")) as detail:
+            worker._refill()
+        self.assertEqual([call.args[0] for call in detail.call_args_list], ["unknown-tech", "unknown-other"])
+        candidates = pool.all(("related",))
+        self.assertEqual([v["bvid"] for v in rs.recommendation._apply_category(candidates, "科技")], ["unknown-tech"])
+        self.assertFalse(pool.get("known-other")["_detail_complete"])
+
     def test_full_pool_never_refreshes_vertical_search(self):
         from backend.services.source_scheduler import SourceScheduler
         from backend.services.source_mixer import update_settings
@@ -328,6 +345,8 @@ class V032Test(unittest.TestCase):
         profile.publish()
         frozen = policy.freeze(True)
         frozen["settings"]["exploration"] = "active"
+        for i in range(8):
+            self.fixture.following(i+1)
         candidates = [video("long"+str(i), tag=["长期"], mid=i+1) for i in range(8)] + [video("short"+str(i), tag=["短期"], mid=i+20) for i in range(8)]
         items = mix(rs.recommendation.rank_sources(candidates, "for_you", "all", set(), FakeBundle(), policy=frozen), options={**settings(), "_policy": frozen})
         self.assertLessEqual(sum(v["_policy"]["pure_short"] for v in items), 3)

@@ -84,3 +84,78 @@ def recommendation_settings():
 def policy_trial():
     from backend.services.recommendation_policy import trial_status, trial_action
     return jsonify(trial_status() if request.method == "GET" else trial_action((request.get_json(silent=True) or {}).get("action")))
+
+
+@bp.route("/policy-reviews", methods=["GET", "POST"])
+@api
+@login_required
+def policy_reviews():
+    from backend.services import policy_review as review
+    data = request.get_json(silent=True) or {}
+    return jsonify(review.list_reviews() if request.method == "GET" else review.create(data.get("candidate"), data.get("request_id")))
+
+
+@bp.get("/policy-reviews/<experiment_id>")
+@api
+@login_required
+def policy_review_detail(experiment_id):
+    from backend.services.policy_review import detail
+    return jsonify(detail(experiment_id))
+
+
+@bp.post("/policy-reviews/<experiment_id>/prepare")
+@api
+@login_required
+def policy_review_prepare(experiment_id):
+    from backend.services.policy_review import request_prepare
+    return jsonify(request_prepare(experiment_id))
+
+
+@bp.post("/policy-reviews/<experiment_id>/abort")
+@api
+@login_required
+def policy_review_abort(experiment_id):
+    from backend.services.policy_review import abort
+    return jsonify(abort(experiment_id, (request.get_json(silent=True) or {}).get("reason")))
+
+
+@bp.get("/policy-reviews/<experiment_id>/batches/<batch_id>")
+@api
+@login_required
+def policy_review_batch(experiment_id, batch_id):
+    from backend.services.policy_review import get_batch
+    return jsonify(get_batch(experiment_id, batch_id))
+
+
+@bp.put("/policy-reviews/<experiment_id>/batches/<batch_id>/items/<item_id>/rating")
+@api
+@login_required
+def policy_review_rate(experiment_id, batch_id, item_id):
+    from backend.services.policy_review import rate
+    data = request.get_json(silent=True) or {}
+    return jsonify(rate(experiment_id, batch_id, item_id, data.get("score"), data.get("revision"), data.get("request_id")))
+
+
+@bp.post("/policy-reviews/<experiment_id>/batches/<batch_id>/submit")
+@api
+@login_required
+def policy_review_submit(experiment_id, batch_id):
+    from backend.services.policy_review import submit
+    return jsonify(submit(experiment_id, batch_id))
+
+
+@bp.get("/policy-reviews/<experiment_id>/report")
+@api
+@login_required
+def policy_review_report(experiment_id):
+    from backend.services.policy_review import report
+    return jsonify(report(experiment_id))
+
+
+@bp.post("/policy-reviews/<experiment_id>/trial")
+@api
+@login_required
+def policy_review_trial(experiment_id):
+    from backend.services.policy_review import start_trial
+    data = request.get_json(silent=True) or {}
+    return jsonify(start_trial(experiment_id, data.get("request_id"), data.get("confirm_restore", False)))

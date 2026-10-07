@@ -109,7 +109,7 @@ class V031Test(unittest.TestCase):
         pools["related"].insert(0, video("f0", mid=1, stranger=True))
         items = mix(pools)
         self.assertEqual(len({v["bvid"] for v in items}), len(items))
-        self.assertLessEqual(sum(v["mid"] == 1 for v in items), 2)
+        self.assertLessEqual(sum(v["mid"] == 1 for v in items), 1)
         self.assertLessEqual(sum(v.get("stranger", False) and v["source"] == "related" for v in items), 3)
 
     def test_downrank_one_and_last(self):
@@ -122,16 +122,16 @@ class V031Test(unittest.TestCase):
         self.assertTrue(items[-1]["downrank"])
 
     def test_single_completion_familiar_and_distinct_regular(self):
-        record_history(video(source="history", progress=-1))
+        record_history(video(source="history", progress=-1, view_at=time.time()))
         self.assertEqual(affinity.snapshot()["ups"]["1"]["level"], "familiar")
         record_history(video(source="history", progress=100, view_at=time.time()))
         self.assertEqual(affinity.snapshot()["ups"]["1"]["watched_count"], 1)
         for bvid in ("BV2", "BV3"):
-            record_history(video(bvid, source="history", progress=50))
+            record_history(video(bvid, source="history", progress=50, view_at=time.time()-86400))
         self.assertEqual(affinity.snapshot()["ups"]["1"]["level"], "regular")
 
     def test_favorite_is_independent_and_can_be_recommended(self):
-        record_history(video(source="favorite", isfaved=1))
+        record_history(video(source="favorite", fav_time=time.time(), isfaved=1))
         snapshot = affinity.snapshot()
         self.assertIn("BV1", snapshot["favorites"])
         self.assertNotIn("BV1", snapshot["watched"])
@@ -143,7 +143,7 @@ class V031Test(unittest.TestCase):
         self.assertEqual(rs.recommendation.refresh("for_you", view_id="watched")["items"], [])
 
     def test_public_favorite_count_does_not_mean_user_favorite(self):
-        record_history(video(source="history", progress=1, favorite=10000))
+        record_history(video(source="history", progress=1, view_at=time.time(), favorite=10000))
         self.assertEqual(affinity.snapshot()["favorites"], set())
         self.assertEqual(affinity.snapshot()["ups"]["1"]["level"], "stranger")
 
@@ -166,9 +166,9 @@ class V031Test(unittest.TestCase):
             self.assertEqual(len(rs.recommendation.rank_sources(candidates, "following", "all", set(), None)["follow"]), 2)
 
     def test_familiar_does_not_recall_old_archives(self):
-        record_history(video(source="history", progress=-1))
+        record_history(video(source="history", progress=-1, view_at=time.time()))
         self.assertEqual(rs.recommendation.rank_sources([video("old", source="up_archive")], "for_you", "all", set(), None)["up_archive"], [])
-        record_history(video(source="favorite"))
+        record_history(video(source="favorite", fav_time=time.time()))
         self.assertEqual(len(rs.recommendation.rank_sources([video("old", source="up_archive")], "for_you", "all", set(), None)["up_archive"]), 1)
 
     def test_quality_gate_and_familiar_exemption(self):
@@ -176,7 +176,7 @@ class V031Test(unittest.TestCase):
         kept = affinity.quality_gate(candidates)
         self.assertNotIn("low", {v["bvid"] for v in kept})
         self.assertNotIn("bad", {v["bvid"] for v in kept})
-        record_history(video(source="history", progress=-1))
+        record_history(video(source="history", progress=-1, view_at=time.time()))
         self.assertIn("low", {v["bvid"] for v in affinity.quality_gate(candidates)})
 
     def test_native_24h_and_two_misses_permanent(self):
@@ -231,7 +231,7 @@ class V031Test(unittest.TestCase):
 
     def test_seeds_category_blocked_penalized_and_used(self):
         for i in range(6):
-            record_history(video(str(i), mid=i+10, source="favorite", tname="科技" if i < 4 else "生活"))
+            record_history(video(str(i), mid=i+10, source="favorite", fav_time=time.time(), tname="科技" if i < 4 else "生活"))
         fs.filters.add_blocked_up("测试UP", 10)
         feedback.record("1", "not_interested", video("1", mid=11), {"reason": "uploader"})
         seeds = affinity.seeds("科技", used=["2"])
@@ -284,8 +284,8 @@ class V031Test(unittest.TestCase):
     def test_scheduler_only_regular_and_hourly_budget(self):
         scheduler = SourceScheduler()
         for i in range(4):
-            record_history(video(str(i), mid=i+1, source="favorite"))
-        record_history(video("familiar", mid=10, source="history", progress=-1))
+            record_history(video(str(i), mid=i+1, source="favorite", fav_time=time.time()))
+        record_history(video("familiar", mid=10, source="history", progress=-1, view_at=time.time()))
         self.following(3)
         fs.filters.add_blocked_up("测试UP", 2)
         with patch.object(bili, "up_archives", return_value={"items": [], "has_more": True}) as fetch:
@@ -344,7 +344,7 @@ class V031Test(unittest.TestCase):
             self.assertIn("recArchivesByKeywords", get.call_args.args[0])
 
     def test_fallback_missing_owner_still_prefilters_uploader(self):
-        record_history(video(source="favorite"))
+        record_history(video(source="favorite", fav_time=time.time()))
         fs.filters.add_rule("测试UP", target_type="uploader")
         with patch.object(bili, "_archive_fallback_until", {"1": time.time()+3600}), patch.object(bili, "get", return_value={"archives": [{"bvid": "archive", "title": "title", "upMid": 1, "stat": {"view": 1000}}], "page": {"total": 1}}), patch.object(bili, "detail") as detail:
             self.assertEqual(bili.up_archives(1)["items"], [])
@@ -352,7 +352,7 @@ class V031Test(unittest.TestCase):
 
     def test_related_seed_budget_and_category(self):
         for i in range(8):
-            record_history(video(str(i), mid=i+1, source="favorite", tname="科技" if i < 6 else "生活"))
+            record_history(video(str(i), mid=i+1, source="favorite", fav_time=time.time(), tname="科技" if i < 6 else "生活"))
         scheduler = SourceScheduler()
         with patch.object(bili, "related", side_effect=lambda bvid: [video("related-"+bvid, seed_bvid=bvid)]) as get:
             items = scheduler.expand_related("科技")
@@ -365,7 +365,7 @@ class V031Test(unittest.TestCase):
         for v in candidates["follow"]:
             self.following(v["mid"])
         for v in candidates["up_archive"]:
-            record_history(video("favorite-"+v["bvid"], mid=v["mid"], source="favorite"))
+            record_history(video("favorite-"+v["bvid"], mid=v["mid"], source="favorite", fav_time=time.time()))
         self.save([v for values in candidates.values() for v in values])
         registry.update(evaluation={"id": "capture", "candidate": "new", "current": "old"})
         capture()

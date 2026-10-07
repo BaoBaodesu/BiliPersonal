@@ -1,4 +1,4 @@
-import { StrictMode } from 'react'
+import { StrictMode, Suspense, lazy } from 'react'
 import { createRoot } from 'react-dom/client'
 import { createBrowserRouter, RouterProvider } from 'react-router-dom'
 import { QueryClient, QueryClientProvider, QueryCache, MutationCache } from '@tanstack/react-query'
@@ -12,6 +12,7 @@ import { FavoritesPage, NotInterestedPage, WatchHistoryPage, WatchLaterPage } fr
 import { RecommendationHistoryPage } from './pages/RecommendationHistoryPage'
 import { InterestsPage } from './pages/InterestsPage'
 import { FiltersPage, SettingsPage } from './pages/SettingsPage'
+const PolicyReviewPage = lazy(() => import('./pages/PolicyReviewPage').then((module) => ({ default: module.PolicyReviewPage })))
 import { LoginPage } from './pages/LoginPage'
 import { EmptyState } from './components/EmptyState'
 
@@ -48,6 +49,7 @@ const router = createBrowserRouter([
       { path: '/profile/interests', element: <InterestsPage /> },
       { path: '/settings/filters', element: <FiltersPage /> },
       { path: '/settings', element: <SettingsPage /> },
+      { path: '/settings/policy-review', element: <Suspense fallback={<p role="status">正在加载策略盲评…</p>}><PolicyReviewPage /></Suspense> },
       { path: '*', element: <EmptyState title="页面不存在" /> },
     ],
   },

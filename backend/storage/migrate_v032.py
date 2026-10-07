@@ -3,7 +3,7 @@ import json
 import time
 
 SOURCE_ORDER = ("follow", "related", "up_archive", "rcmd", "hot", "vertical_search")
-REASON_FIELDS = ("seed_bvid", "seed_title", "query", "archive_order", "rcmd_reason", "query_theme", "special_mid")
+REASON_FIELDS = ("seed_bvid", "seed_title", "query", "archive_order", "rcmd_reason", "query_theme", "special_mid", "intent", "entity_id", "dictionary_version")
 
 
 def body(video):

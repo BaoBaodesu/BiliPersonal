@@ -139,7 +139,7 @@ class V03Test(unittest.TestCase):
         from backend.services import recommendation_service as rs
         service=rs.RecommendationService()
         class Pool:
-            def all(self,sources):return [video(f'BV{i}',tag=["未知"]) for i in range(15)]
+            def all(self,sources):return [video(f'BV{i}',mid=i+1,tag=["未知"]) for i in range(15)]
             def expand(self,*args,**kwargs):pass
         with patch.object(rs,"pool",Pool()), patch.object(service,"_background"), patch.object(evaluation,"predict",return_value={}):
             first=service.get_feed("for_you",limit=4,view_id="first")
@@ -154,7 +154,7 @@ class V03Test(unittest.TestCase):
             self.assertEqual(newer["model_version"],"new")
             with db.connect() as conn:self.assertEqual(conn.execute("SELECT COUNT(*) FROM recommendation_history").fetchone()[0],12)
             feedback.record(first["items"][0]["bvid"],"block_up",context={"recommendation_id":first["items"][0]["recommendation_id"],"view_id":"first","exposure_id":"block","event_id":"block"})
-            self.assertEqual(service.get_feed("for_you",limit=4,view_id="first")["items"],[])
+            self.assertNotIn(first["items"][0]["mid"], {v["mid"] for v in service.get_feed("for_you",limit=4,view_id="first")["items"]})
 
     def test_fallback_records_and_warmup(self):
         from backend.services import recommendation_service as rs

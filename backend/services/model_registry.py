@@ -115,10 +115,13 @@ class ModelRegistry:
             return bundle
 
     def activate(self, version, anchor=False):
-        self.load(version)
-        state = self.state()
-        self.update(active=version, previous=state.get("active"), trial=None,
-                    anchor=version if anchor else state.get("anchor"))
+        from backend.services.policy_review import guard_change
+        with self._lock:
+            guard_change()
+            self.load(version)
+            state = self.state()
+            self.update(active=version, previous=state.get("active"), trial=None,
+                        anchor=version if anchor else state.get("anchor"))
 
 
 registry = ModelRegistry()

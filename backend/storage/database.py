@@ -8,14 +8,20 @@ import os
 import sqlite3
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 from backend.config import DATA_DIR, DB_PATH
 from backend.storage.migrations import SCHEMA
 from backend.services import feed_performance as perf
 
+_reader = ContextVar("database_snapshot_reader", default=None)
+
 
 @contextmanager
 def connect():
+    if _reader.get() is not None:
+        yield _reader.get()
+        return
     conn = perf.sql_connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -24,6 +30,19 @@ def connect():
         conn.commit()
     finally:
         conn.close()
+
+
+@contextmanager
+def read_snapshot():
+    """盲评捕获共用一个只读事务，嵌套读取不另开连接或提交。"""
+    with connect() as conn:
+        conn.execute("BEGIN")
+        conn.execute("PRAGMA query_only=ON")
+        token = _reader.set(conn)
+        try:
+            yield conn
+        finally:
+            _reader.reset(token)
 
 
 def init_db():
@@ -41,6 +60,8 @@ def init_db():
         migrate(conn)
         from backend.storage.migrate_v032 import upgrade
         upgrade(conn)
+        from backend.storage.migrate_v034 import upgrade as blind_upgrade
+        blind_upgrade(conn)
 
 
 def now():

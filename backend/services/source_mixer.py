@@ -16,8 +16,14 @@ def update_settings(changes):
         raise ValueError("未知来源设置")
     if any(changes.get(s, "off") not in SOURCE_LEVELS for s in ("hot", "rcmd", "vertical_search")) or ("classic" in changes and type(changes["classic"]) is not bool):
         raise ValueError("非法来源档位或经典首页开关")
-    value = {**settings(), **changes}
-    set_state("sources:settings", value)
+    from backend.services.recommendation_controls import invalidate
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        from backend.services.policy_review import guard_change, _state, _write_state
+        guard_change(conn)
+        value = {**SOURCE_DEFAULTS, **_state(conn, "sources:settings", {}), **changes}
+        _write_state(conn, "sources:settings", value)
+        invalidate(conn)
     return value
 
 
@@ -48,7 +54,7 @@ def mix(pools, limit=12, options=None, following=False):
     if not following:
         for source in ("hot", "rcmd", "vertical_search"):
             if options.get(source, "off") == "off":
-                queues[source] = []
+                queues[source] = [v for v in queues.get(source, []) if source == "vertical_search" and v.get("_controls", {}).get("intent") == "third_party"]
         if enabled and ARCHIVE[policy["settings"]["archive"]] == 0:
             queues["up_archive"] = []
     targets = quotas(limit, options) if not following else {"follow": limit}
@@ -65,17 +71,22 @@ def mix(pools, limit=12, options=None, following=False):
             else:
                 video = queues[source].pop(0)
             key = up_key(video)
-            stranger = source == "related" and video.get("stranger")
-            if video["bvid"] in seen or (not following and ups[key] >= (1 if enabled else SOURCE_UP_LIMIT)):
+            intent = video.get("_controls", {}).get("intent")
+            stranger = source == "related" and video.get("stranger") and intent not in ("discovery", "third_party")
+            if video["bvid"] in seen or (not following and ups[key] >= 1):
                 continue
-            if enabled and source in ("hot", "rcmd", "vertical_search") and options.get(source) != "fallback" and sum(v["source"] == source for v in selected+downranked) >= targets.get(source, 0):
+            if not following and video.get("_controls"):
+                from backend.services.recommendation_controls import select
+                if len(select(selected+downranked+[video], len(selected+downranked)+1, options.get("_exposure_pages"))) != len(selected+downranked)+1:
+                    continue
+            if enabled and source in ("hot", "rcmd", "vertical_search") and intent != "third_party" and options.get(source) != "fallback" and sum(v["source"] == source and v.get("_controls", {}).get("intent") != "third_party" for v in selected+downranked) >= targets.get(source, 0):
                 continue
             meta = video.get("_policy", {})
             chosen = selected+downranked
             if video.get("replay") and any(v.get("replay") for v in chosen):
                 continue
             if enabled and ((meta.get("pure_short") and sum(v.get("_policy", {}).get("pure_short", False) for v in chosen) >= 3) or
-                            (meta.get("exploratory") and sum(v.get("_policy", {}).get("exploratory", False) for v in chosen) >= EXPLORATION[policy["settings"]["exploration"]])):
+                            (meta.get("exploratory") and intent not in ("discovery", "third_party") and sum(v.get("_policy", {}).get("exploratory", False) and v.get("_controls", {}).get("intent") not in ("discovery", "third_party") for v in chosen) >= EXPLORATION[policy["settings"]["exploration"]])):
                 continue
             if stranger and (sum(strangers.values()) >= SOURCE_STRANGER_LIMIT or strangers[key]):
                 continue
@@ -100,6 +111,9 @@ def mix(pools, limit=12, options=None, following=False):
                 covered.update(video["_policy"]["topics"])
     # 个性化来源交错输出，原生来源的固定名额先保留。
     remaining_targets = {s: count-sum(v["source"] == s for v in selected+downranked) for s, count in targets.items()}
+    if not following and any(v.get("_controls", {}).get("intent") == "third_party" for v in queues.get("vertical_search", [])):
+        from backend.services.recommendation_controls import CAPS
+        remaining_targets["vertical_search"] = max(remaining_targets.get("vertical_search", 0), CAPS[policy.get("controls", {}).get("settings", {}).get("third_party", "small")])
     for index in range(max(remaining_targets.values(), default=0)):
         for source in ("follow", "related", "up_archive", "rcmd", "hot", "vertical_search"):
             if len(selected)+len(downranked) < limit and index < remaining_targets.get(source, 0):
@@ -111,6 +125,11 @@ def mix(pools, limit=12, options=None, following=False):
         if options.get(source, "off") == "fallback":
             while len(selected) + len(downranked) < limit and take(source):
                 pass
+    # 定向第三方不占主题查询份额，也不预留位置，只补合格空位。
+    if not following:
+        queues["vertical_search"] = [v for v in pools.get("vertical_search", []) if v.get("_controls", {}).get("intent") == "third_party"]
+        while len(selected)+len(downranked) < limit and take("vertical_search"):
+            pass
     if enabled:
         eligible = [v for v in selected if v.get("_policy", {}).get("top4_eligible")]
         selected = eligible[:4]+[v for v in selected if v not in eligible[:4]]

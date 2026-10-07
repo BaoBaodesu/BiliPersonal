@@ -94,12 +94,13 @@ class FilterService:
 
     # ---------------- 加载 ----------------
 
-    def load_rules(self, force=False):
+    def load_rules(self, force=False, conn=None):
         version = get_filter_version()
         with self._lock:
-            if not force and self._cache is not None and self._cache_version == version:
+            if conn is None and not force and self._cache is not None and self._cache_version == version:
                 return self._cache
-            conn = _connect()
+            owned = conn is None
+            conn = conn or _connect()
             try:
                 rows = [
                     dict(r)
@@ -112,7 +113,8 @@ class FilterService:
                     for r in conn.execute("SELECT id, mid, name FROM blocked_ups").fetchall()
                 ]
             finally:
-                conn.close()
+                if owned:
+                    conn.close()
 
             title_rules = []
             uploader_rules = []
@@ -139,7 +141,7 @@ class FilterService:
                 elif r["target_type"] == TARGET_ZONE:
                     zone_rules.append(entry)
 
-            self._cache = {
+            value = {
                 "version": version,
                 "title": title_rules,
                 "uploader": uploader_rules,
@@ -148,8 +150,9 @@ class FilterService:
                 "blocked_mids": {u["mid"] for u in ups if u["mid"] is not None},
                 "blocked_names": {u["name"] for u in ups if u["name"] and u["mid"] is None},
             }
-            self._cache_version = version
-            return self._cache
+            if owned:
+                self._cache, self._cache_version = value, version
+            return value
 
     def invalidate(self):
         with self._lock:
@@ -195,15 +198,15 @@ class FilterService:
         return bool(author) and author in rules["blocked_names"]
 
     @perf.measured("filter_ms")
-    def filter_candidates(self, candidates, record=False):
+    def filter_candidates(self, candidates, record=False, rules=None, penalties=None):
         """按任务书顺序过滤：精确 MID → UP 关键词 → 标题关键词 → 标签 → 分区。
 
         返回 (保留的视频列表, 统计)。record=True 时把命中写入 hit_count（同一视频
         命中同一规则只记 1 次；命中多条规则各自 +1）。
         """
-        rules = self.load_rules()
+        rules = rules if rules is not None else self.load_rules()
         from backend.services.affinity import affinity, up_key
-        penalties = affinity.penalties()
+        penalties = affinity.penalties() if penalties is None else penalties
         kept = []
         stats = {"input": len(candidates), "blocked_mid": 0, "blocked_uploader": 0, "blocked_title": 0, "blocked_tag": 0, "blocked_zone": 0}
         pending = {}

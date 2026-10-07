@@ -174,3 +174,14 @@ def search_history():
 def all_video_preferences():
     from backend.services.interest_profile import preferences
     return jsonify(preferences())
+
+
+@bp.route("/user/entities", methods=["GET", "PUT"])
+@api
+@login_required
+def entities():
+    from backend.services import entity_aliases
+    try:
+        return jsonify(entity_aliases.snapshot() if request.method == "GET" else entity_aliases.update(request.get_json(silent=True)))
+    except ValueError as exception:
+        return error("bad_request", str(exception), 400)

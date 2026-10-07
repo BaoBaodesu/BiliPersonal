@@ -1,6 +1,7 @@
 import type {
   AuthStatus,
-  InterestSettings, PolicySettings, PolicyTrial,
+  ReviewCandidate, ReviewList, PolicyReview, BlindBatch, BlindItem, ReviewReport,
+  InterestSettings, PolicySettings, PolicyTrial, EntityDictionary, SearchResult, FeedReadiness,
   Category,
   DebugInfo,
   Explain,
@@ -29,6 +30,7 @@ import type {
 export class ApiError extends Error {
   status: number
   code: string
+  retryCursor?: string
   constructor(status: number, code: string, message: string) {
     super(message)
     this.status = status
@@ -50,7 +52,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
-    throw new ApiError(res.status, data.error || 'error', data.message || `请求失败 ${res.status}`)
+    if (data.error === 'trial_locked' && init?.method && typeof window !== 'undefined') {
+      if (window.confirm('这次修改会结束当前策略试用。是否恢复试用前状态，再应用本次修改？取消将继续当前试用。')) {
+        await request('/system/policy-trial', { method: 'POST', body: JSON.stringify({ action: 'stop' }) })
+        window.dispatchEvent(new Event('policy-trial-changed'))
+        return request<T>(path, init)
+      }
+    }
+    const error = new ApiError(res.status, data.error || 'error', data.message || `请求失败 ${res.status}`)
+    error.retryCursor = data.retry_cursor ?? undefined
+    throw error
   }
   return data as T
 }
@@ -60,6 +71,18 @@ const post = <T>(path: string, body?: unknown) =>
 const del = <T>(path: string) => request<T>(path, { method: 'DELETE' })
 
 export const api = {
+  reviews: {
+    list: () => request<ReviewList>('/system/policy-reviews'),
+    create: (candidate: ReviewCandidate, request_id: string) => post<PolicyReview>('/system/policy-reviews', { candidate, request_id }),
+    detail: (id: string) => request<PolicyReview>(`/system/policy-reviews/${id}`),
+    prepare: (id: string) => post<PolicyReview>(`/system/policy-reviews/${id}/prepare`),
+    abort: (id: string, reason: string) => post<PolicyReview>(`/system/policy-reviews/${id}/abort`, { reason }),
+    batch: (id: string, batch: string) => request<BlindBatch>(`/system/policy-reviews/${id}/batches/${batch}`),
+    rate: (id: string, batch: string, item: string, score: number, revision: number, request_id: string) => request<Pick<BlindItem, 'blind_item_id' | 'score' | 'revision'>>(`/system/policy-reviews/${id}/batches/${batch}/items/${item}/rating`, { method: 'PUT', body: JSON.stringify({ score, revision, request_id }) }),
+    submit: (id: string, batch: string) => post<PolicyReview>(`/system/policy-reviews/${id}/batches/${batch}/submit`),
+    report: (id: string) => request<ReviewReport>(`/system/policy-reviews/${id}/report`),
+    trial: (id: string, request_id: string, confirm_restore: boolean) => post<PolicyTrial>(`/system/policy-reviews/${id}/trial`, { request_id, confirm_restore }),
+  },
   auth: {
     status: () => request<AuthStatus>('/auth/status'),
     qrcode: () => post<{ qrcode_key: string; image: string }>('/auth/qrcode'),
@@ -70,13 +93,14 @@ export const api = {
     logout: () => post<{ success: boolean }>('/auth/logout'),
   },
   feed: {
+    readiness: (streamId: string) => request<FeedReadiness>(`/feed/readiness?stream_id=${encodeURIComponent(streamId)}`),
     get: (type: FeedType, category: string, cursor?: string | null, limit = 12, view_id?: string, signal?: AbortSignal) => {
       const q = new URLSearchParams({ type, category, limit: String(limit) })
       if (cursor) q.set('cursor', cursor)
       if (view_id && !cursor) q.set('view_id', view_id)
       return request<FeedPage>(`/feed?${q}`, { signal })
     },
-    refresh: (type: FeedType, category: string, limit = 12, view_id = crypto.randomUUID()) =>
+    refresh: (type: FeedType, category: string, limit = 12, view_id: string = crypto.randomUUID()) =>
       post<FeedPage>('/feed/refresh', { type, category, limit, view_id }),
     categories: () => request<{ items: Category[] }>('/feed/categories'),
     explain: (bvid: string, recommendationId?: number) => request<Explain>(`/feed/explain/${bvid}${recommendationId ? `?recommendation_id=${recommendationId}` : ""}`),
@@ -85,9 +109,9 @@ export const api = {
         `/feed/history?limit=50&offset=${offset}${type ? `&type=${type}` : ''}`,
       ),
   },
-  search: (q: string, page = 1, signal?: AbortSignal) =>
-    request<{ items: Video[]; page: number; num_pages: number }>(
-      `/search?q=${encodeURIComponent(q)}&page=${page}`, { signal },
+  search: (q: string, page: number | string = 1, signal?: AbortSignal, entityId?: string) =>
+    request<SearchResult>(
+      `/search?q=${encodeURIComponent(q)}&${typeof page === 'string' ? `cursor=${encodeURIComponent(page)}` : `page=${page}`}${entityId ? `&entity_id=${encodeURIComponent(entityId)}` : ''}`, { signal },
     ),
   feedback: {
     send: (bvid: string, action: FeedbackAction, video?: Partial<Video>, event_id = crypto.randomUUID(), reason?: FeedbackReason) =>
@@ -145,6 +169,8 @@ export const api = {
     summary: () => request<FilterSummary>('/filters/summary'),
   },
   user: {
+    entities: () => request<EntityDictionary>('/user/entities'),
+    setEntities: (value: EntityDictionary) => request<EntityDictionary>('/user/entities', { method: 'PUT', body: JSON.stringify(value) }),
     videoPreferences: () => request<Record<string, { purpose: string; allow_replay: boolean; replay_days: number }>>('/user/video-preferences'),
     interestSettings: () => request<InterestSettings>('/user/interest-settings'),
     setInterestSettings: (value: Partial<InterestSettings>) => request<InterestSettings>('/user/interest-settings', { method: 'PUT', body: JSON.stringify(value) }),

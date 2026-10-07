@@ -22,9 +22,9 @@ function browser(failFirst = false) {
   function load(file, require) {
     const context = vm.createContext({ ...base, exports: {}, require })
     let source = stripTypeScriptTypes(fs.readFileSync(file, 'utf8'), { mode: 'transform' })
-    const names = [...source.matchAll(/export (?:class|function) (\w+)/g)].map(match => match[1])
+    const names = [...source.matchAll(/export (?:class|(?:async )?function) (\w+)/g)].map(match => match[1])
     source = source.replace(/import (\{[^}]+\}) from (['"][^'"]+['"]);?/g, 'const $1 = require($2)')
-      .replace(/export (?=class|function)/g, '')
+      .replace(/export (?=class|(?:async )?function)/g, '')
     vm.runInContext(source + '\n' + names.map(name => `exports.${name} = ${name}`).join('\n'), context)
     return context.exports
   }
